@@ -212,7 +212,19 @@ def validate_source_photo(
     spec: PhotoSpec,
     require_bg_removal: bool = True,
 ) -> ValidationReport:
-    """Validate the uploaded portrait before conversion."""
+    """Strict 'as-is' check: is this already a good passport candidate?
+
+    For conversion eligibility use :func:`validate_source_convertible` instead.
+    """
+    return validate_source_as_is(im, spec, require_bg_removal=require_bg_removal)
+
+
+def validate_source_as_is(
+    im: Image.Image,
+    spec: PhotoSpec,
+    require_bg_removal: bool = True,
+) -> ValidationReport:
+    """Strict validation of the *current* photo against passport expectations."""
     issues: List[ValidationIssue] = []
     checks: Dict[str, Any] = {}
 
@@ -247,7 +259,9 @@ def validate_source_photo(
                 how_to_fix="Use a clear front-facing photo of one person, looking at the camera, with the face fully visible.",
             )
         )
-        return ValidationReport(passed=False, stage="source", issues=issues, checks=checks)
+        return ValidationReport(
+            passed=False, stage="source_as_is", issues=issues, checks=checks
+        )
 
     if len(faces) > 1:
         # Only flag secondary faces that are large (real second person), not Haar noise
@@ -493,8 +507,249 @@ def validate_source_photo(
     # Background removal is required for Indian passport digital pipeline
     checks["require_bg_removal"] = require_bg_removal
 
+    # As-is photos should already have a mostly white background in the corners
+    rgb_bg = np.array(im.convert("RGB"))
+    s = max(8, min(w, h) // 12)
+    corners = [
+        rgb_bg[:s, :s],
+        rgb_bg[:s, -s:],
+        rgb_bg[-s:, :s],
+        rgb_bg[-s:, -s:],
+    ]
+    corner_means = [float(c.mean()) for c in corners]
+    checks["as_is_corner_brightness"] = [round(v, 1) for v in corner_means]
+    if any(m < 220 for m in corner_means):
+        issues.append(
+            ValidationIssue(
+                code="background_not_passport_ready",
+                message="Background is not plain white enough for passport use as-is.",
+                how_to_fix="Use Convert — the app can replace the background if the face is clear — or retake on a white backdrop.",
+            )
+        )
+
     passed = len(issues) == 0
-    return ValidationReport(passed=passed, stage="source", issues=issues, checks=checks)
+    return ValidationReport(passed=passed, stage="source_as_is", issues=issues, checks=checks)
+
+
+def validate_source_convertible(
+    im: Image.Image,
+    spec: PhotoSpec,
+) -> ValidationReport:
+    """Lighter check: can our converter likely produce a valid passport photo?
+
+    Allows imperfect backgrounds, framing, and mild size issues that crop +
+    white-bg replacement can fix. Still blocks unusable inputs (no face, multi
+    person, extreme blur, closed eyes, etc.).
+    """
+    issues: List[ValidationIssue] = []
+    checks: Dict[str, Any] = {"mode": "convertible"}
+
+    w, h = im.size
+    checks["image_width"] = w
+    checks["image_height"] = h
+    min_side = min(w, h)
+    checks["min_side_px"] = min_side
+
+    # Slightly looser resolution (crop still needs detail)
+    if min_side < 300:
+        issues.append(
+            ValidationIssue(
+                code="resolution_too_low",
+                message="Image resolution is too low to produce a sharp passport print.",
+                how_to_fix="Use a higher-resolution phone photo (full quality, not a tiny thumbnail).",
+            )
+        )
+
+    bgr, gray, _, _ = _to_bgr_gray(im)
+    faces = _detect_faces(gray)
+    checks["face_count"] = len(faces)
+
+    if len(faces) == 0:
+        issues.append(
+            ValidationIssue(
+                code="no_face",
+                message="No face detected — cannot convert to a passport photo.",
+                how_to_fix="Use a clear front-facing photo of one person looking at the camera.",
+            )
+        )
+        return ValidationReport(
+            passed=False, stage="source_convertible", issues=issues, checks=checks
+        )
+
+    primary = faces[0]
+    p_area = primary[2] * primary[3]
+    significant = [f for f in faces[1:] if (f[2] * f[3]) > 0.45 * p_area]
+    checks["secondary_significant_faces"] = len(significant)
+    if significant:
+        issues.append(
+            ValidationIssue(
+                code="multiple_faces",
+                message="Multiple people detected — converter needs a single-person photo.",
+                how_to_fix="Photograph only one person (not a contact sheet or group photo).",
+            )
+        )
+
+    fx, fy, fw, fh = primary
+    face_area_ratio = (fw * fh) / float(w * h)
+    checks["face_area_ratio"] = round(face_area_ratio, 4)
+    # Much looser than as-is: room portraits are often small in frame
+    if face_area_ratio < 0.012:
+        issues.append(
+            ValidationIssue(
+                code="face_too_small",
+                message="Face is too small / far away to convert reliably.",
+                how_to_fix="Move closer so the head and shoulders are clearly visible.",
+            )
+        )
+
+    face_roi = gray[fy : fy + fh, fx : fx + fw]
+    blur = _laplacian_var(face_roi)
+    checks["sharpness_laplacian_var"] = round(blur, 1)
+    if blur < 10:
+        issues.append(
+            ValidationIssue(
+                code="too_blurry",
+                message="Photo is too blurry to produce an acceptable passport print.",
+                how_to_fix="Retake in focus with the camera steady and good light.",
+            )
+        )
+
+    bright = _face_brightness_stats(gray, primary)
+    checks["face_brightness_mean"] = round(bright["mean"], 1)
+    if bright["mean"] < 25:
+        issues.append(
+            ValidationIssue(
+                code="too_dark",
+                message="Face is far too dark to convert well.",
+                how_to_fix="Retake with even front lighting.",
+            )
+        )
+    if bright["mean"] > 230:
+        issues.append(
+            ValidationIssue(
+                code="too_bright",
+                message="Face is overexposed / washed out.",
+                how_to_fix="Retake with softer light (no harsh flash).",
+            )
+        )
+
+    skin = _skin_ratio(bgr, primary)
+    checks["skin_ratio"] = round(skin, 3)
+    if skin < 0.02:
+        issues.append(
+            ValidationIssue(
+                code="face_not_personlike",
+                message="Detected region does not look like a real person.",
+                how_to_fix="Upload a real colour photo of a person.",
+            )
+        )
+
+    eyes = _detect_eyes(gray, primary)
+    checks["eye_count"] = len(eyes)
+    if len(eyes) < 2:
+        issues.append(
+            ValidationIssue(
+                code="eyes_not_detected",
+                message="Both open eyes are not clearly visible — cannot make a valid passport photo.",
+                how_to_fix="Look at the camera with both eyes open; remove dark glasses; keep hair off the eyes.",
+            )
+        )
+    else:
+        e_sorted = sorted(eyes[:2], key=lambda e: e[0])
+        left, right = e_sorted[0], e_sorted[1]
+        ly = left[1] + left[3] / 2
+        ry = right[1] + right[3] / 2
+        eye_tilt = abs(ly - ry) / max(fh, 1)
+        checks["eye_tilt_ratio"] = round(eye_tilt, 3)
+        if eye_tilt > 0.18:
+            issues.append(
+                ValidationIssue(
+                    code="head_tilted",
+                    message="Head is tilted too much for a passport photo.",
+                    how_to_fix="Keep your head straight and face the camera.",
+                )
+            )
+        dark_eyes = 0
+        for ex, ey, ew, eh in eyes[:2]:
+            eroi = gray[ey : ey + eh, ex : ex + ew]
+            if eroi.size and float(eroi.mean()) < 35:
+                dark_eyes += 1
+        if dark_eyes >= 2:
+            issues.append(
+                ValidationIssue(
+                    code="possible_dark_glasses",
+                    message="Dark / tinted glasses detected.",
+                    how_to_fix="Remove tinted glasses before converting.",
+                )
+            )
+
+    white_cloth = _white_clothing_risk(bgr, primary, h)
+    checks["white_clothing_ratio"] = round(white_cloth, 3)
+    if white_cloth > 0.75:
+        issues.append(
+            ValidationIssue(
+                code="white_clothing",
+                message="Clothing looks pure white (often rejected on a white background).",
+                how_to_fix="Wear a medium-coloured top (not pure white).",
+            )
+        )
+
+    rgb = np.array(im.convert("RGB")).astype(np.float32)
+    colourfulness = float(
+        np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 1]))
+        + np.mean(np.abs(rgb[:, :, 1] - rgb[:, :, 2]))
+    )
+    checks["colourfulness"] = round(colourfulness, 2)
+    if colourfulness < 4.0:
+        issues.append(
+            ValidationIssue(
+                code="not_colour",
+                message="Photo appears black-and-white.",
+                how_to_fix="Upload a colour photograph.",
+            )
+        )
+
+    # Note: messy backgrounds are OK for convertible — converter replaces them
+    checks["background_can_be_replaced"] = True
+
+    passed = len(issues) == 0
+    return ValidationReport(
+        passed=passed, stage="source_convertible", issues=issues, checks=checks
+    )
+
+
+def assess_photo(im: Image.Image, spec: PhotoSpec) -> Dict[str, Any]:
+    """Run both as-is and convertible checks; recommend next step."""
+    as_is = validate_source_as_is(im, spec)
+    convertible = validate_source_convertible(im, spec)
+
+    if as_is.passed:
+        recommendation = "already_ok"
+        summary = (
+            "This photo already passes automated passport checks. "
+            "You can still Convert to get standard print/upload files."
+        )
+    elif convertible.passed:
+        recommendation = "convertible"
+        summary = (
+            "This photo is not passport-ready as-is, but it looks convertible. "
+            "Use Convert — the app will fix background/framing and re-validate."
+        )
+    else:
+        recommendation = "retake"
+        summary = (
+            "This photo cannot be fixed automatically. "
+            "Retake using the suggested fixes below."
+        )
+
+    return {
+        "recommendation": recommendation,
+        "summary": summary,
+        "as_is": as_is.to_dict(),
+        "convertible": convertible.to_dict(),
+        "can_check_only_pass": as_is.passed,
+        "can_convert": convertible.passed,
+    }
 
 
 def validate_output_photo(

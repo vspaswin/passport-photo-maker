@@ -159,11 +159,17 @@ select {
   word-break: break-all;
 }
 
+.btn-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
 .btn {
   border: none;
   border-radius: 10px;
   padding: 0.75rem 1.1rem;
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
   width: 100%;
@@ -178,10 +184,31 @@ select {
   background: var(--accent-hover);
 }
 
+.btn.secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn.secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #93c5fd;
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.mode-help {
+  margin: 0.85rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.mode-help li { margin: 0.25rem 0; }
+.mode-help strong { color: var(--text); }
 
 .status {
   min-height: 1.4em;
@@ -230,7 +257,8 @@ select {
 }
 
 .pass-badge,
-.reject-badge {
+.reject-badge,
+.info-badge {
   display: inline-block;
   font-size: 0.85rem;
   font-weight: 700;
@@ -239,16 +267,38 @@ select {
   text-align: center;
 }
 
-.pass-badge {
+.pass-badge,
+.info-badge.ok {
   background: color-mix(in srgb, var(--ok) 18%, var(--surface-2));
   color: #86efac;
   border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--border));
 }
 
-.reject-badge {
+.reject-badge,
+.info-badge.bad {
   background: color-mix(in srgb, var(--danger) 18%, var(--surface-2));
   color: #fca5a5;
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.info-badge.warn {
+  background: color-mix(in srgb, var(--warn) 18%, var(--surface-2));
+  color: #fcd34d;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.pill.neutral {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.summary-text {
+  color: var(--text);
+  margin: 0 0 0.75rem;
+}
+
+.val-section {
+  margin-bottom: 1rem;
 }
 
 .validation-box {

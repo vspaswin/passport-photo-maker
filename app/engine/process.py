@@ -20,7 +20,7 @@ from .validate import (
     ValidationReport,
     merge_reports,
     validate_output_photo,
-    validate_source_photo,
+    validate_source_convertible,
 )
 
 logger = logging.getLogger(__name__)
@@ -448,35 +448,34 @@ def process_photo(
 
     All processing is local (no network).
 
-    When ``strict`` is True (default), the photo must pass source + output
-    validation or ``PhotoValidationError`` is raised and no files are produced.
+    When ``strict`` is True (default):
+      1) Source must be *convertible* (face/eyes/quality good enough to fix)
+      2) After conversion, *output* must pass full passport QC
+    Messy backgrounds on the source are allowed — the converter fixes them.
     """
     spec = get_spec(doc_type)
     warnings: List[str] = []
 
     original = load_image(image_bytes)
 
-    # --- Stage 1: source validation (before expensive bg removal) ---
-    # Background replacement is required for Indian passport digital cleanliness
+    # --- Stage 1: convertible check (not full as-is passport QC) ---
     if strict and not remove_bg:
         raise PhotoValidationError(
             ValidationReport(
                 passed=False,
-                stage="source",
+                stage="source_convertible",
                 issues=[
                     ValidationIssue(
                         code="bg_removal_required",
                         message="White background replacement is required for a submittable passport photo.",
-                        how_to_fix='Keep "Replace background with plain white" enabled.',
+                        how_to_fix="Background replacement is always applied during convert.",
                     )
                 ],
                 checks={},
             )
         )
 
-    source_report = validate_source_photo(
-        original, spec, require_bg_removal=remove_bg
-    )
+    source_report = validate_source_convertible(original, spec)
     if strict and not source_report.passed:
         raise PhotoValidationError(source_report)
 

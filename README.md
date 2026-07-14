@@ -99,18 +99,17 @@ python -m app.main
 # API docs: http://127.0.0.1:8765/docs
 ```
 
-## Strict validation
+## Two-step validation
 
-Conversion is blocked (HTTP 422, no download files) when automated checks fail, including:
+| Mode | API | What it does |
+|------|-----|----------------|
+| **Check only** | `POST /api/validate` | **As-is** QC (already passport-ready?) + **Convertible** QC (can Convert fix it?) |
+| **Convert** | `POST /api/convert` | Requires **convertible** → white bg + crop → **final output QC**. Downloads only if final passes. |
 
-- No face / multiple people  
-- Face too small, too close, or clipped  
-- Blurry or poorly lit face  
-- Eyes not clearly open / dark glasses / head tilt  
-- Not a colour photo / likely pure white clothing  
-- Final background not clean white / final geometry off  
+**Convertible** allows messy room backgrounds (converter replaces them).  
+**As-is** / **final output** require clean white background, geometry, eyes, etc.
 
-When validation passes, the ZIP includes `VALIDATION_PASSED.txt` with check details.
+When conversion passes, the ZIP includes `VALIDATION_PASSED.txt` with check details.
 
 ## Disclaimer
 

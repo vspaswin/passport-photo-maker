@@ -4,6 +4,7 @@
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("fileInput");
   const fileName = document.getElementById("fileName");
+  const checkBtn = document.getElementById("checkBtn");
   const convertBtn = document.getElementById("convertBtn");
   const status = document.getElementById("status");
   const emptyState = document.getElementById("emptyState");
@@ -16,18 +17,24 @@
   const validationBox = document.getElementById("validationBox");
   const rejectBadge = document.getElementById("rejectBadge");
   const passBadge = document.getElementById("passBadge");
+  const infoBadge = document.getElementById("infoBadge");
 
   let selectedFile = null;
   let modelReady = true;
 
   const DESCRIPTIONS = {
     "indian-passport":
-      "2×2 inch colour photo, white background, ICAO/VFS geometry. Strict automated QC required before any download.",
+      "Indian Passport / Visa / OCI — 2×2\", white background, VFS/MEA geometry.",
   };
 
   function setStatus(msg, kind) {
     status.textContent = msg || "";
     status.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function setBusy(busy) {
+    checkBtn.disabled = busy || !selectedFile;
+    convertBtn.disabled = busy || !selectedFile;
   }
 
   function updateDocDescription() {
@@ -42,8 +49,8 @@
     }
     selectedFile = file;
     fileName.textContent = file.name + " · " + Math.round(file.size / 1024) + " KB";
-    convertBtn.disabled = false;
-    setStatus("Ready — will validate, then convert only if checks pass.");
+    setBusy(false);
+    setStatus("Ready — Check only, or Convert to passport.");
   }
 
   dropzone.addEventListener("click", () => fileInput.click());
@@ -76,47 +83,9 @@
 
   function pill(label, ok) {
     const span = document.createElement("span");
-    span.className = "pill " + (ok ? "ok" : "bad");
+    span.className = "pill " + (ok === true ? "ok" : ok === false ? "bad" : "neutral");
     span.textContent = label;
     return span;
-  }
-
-  function showResultShell() {
-    emptyState.classList.add("hidden");
-    result.classList.remove("hidden");
-  }
-
-  function renderValidation(validation, passed) {
-    validationBox.innerHTML = "";
-    if (!validation) return;
-
-    const title = document.createElement("h3");
-    title.textContent = passed
-      ? "Automated checks — all passed"
-      : "Photo rejected — fix these issues";
-    title.className = passed ? "val-title ok" : "val-title bad";
-    validationBox.appendChild(title);
-
-    const issues = validation.issues || [];
-    if (!passed && issues.length) {
-      const list = document.createElement("ul");
-      list.className = "issue-list";
-      issues.forEach((issue) => {
-        const li = document.createElement("li");
-        li.innerHTML =
-          `<strong>${escapeHtml(issue.message)}</strong>` +
-          `<div class="fix">${escapeHtml(issue.how_to_fix || "")}</div>` +
-          `<div class="code">${escapeHtml(issue.code || "")}</div>`;
-        list.appendChild(li);
-      });
-      validationBox.appendChild(list);
-    } else if (passed) {
-      const p = document.createElement("p");
-      p.className = "hint";
-      p.textContent =
-        "Source and final photo passed face, eyes, sharpness, lighting, clothing, background, and geometry checks.";
-      validationBox.appendChild(p);
-    }
   }
 
   function escapeHtml(s) {
@@ -127,17 +96,106 @@
       .replace(/"/g, "&quot;");
   }
 
-  function renderSuccess(data) {
+  function showResultShell() {
+    emptyState.classList.add("hidden");
+    result.classList.remove("hidden");
+  }
+
+  function renderIssueList(title, report, titleClass) {
+    const wrap = document.createElement("div");
+    wrap.className = "val-section";
+    const h = document.createElement("h3");
+    h.className = "val-title " + (titleClass || "");
+    h.textContent = title;
+    wrap.appendChild(h);
+
+    const issues = (report && report.issues) || [];
+    if (!issues.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = "No issues.";
+      wrap.appendChild(p);
+      return wrap;
+    }
+    const list = document.createElement("ul");
+    list.className = "issue-list";
+    issues.forEach((issue) => {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<strong>${escapeHtml(issue.message)}</strong>` +
+        `<div class="fix">${escapeHtml(issue.how_to_fix || "")}</div>` +
+        `<div class="code">${escapeHtml(issue.code || "")}</div>`;
+      list.appendChild(li);
+    });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  function renderCheckResult(data) {
+    showResultShell();
+    preview.classList.add("hidden");
+    preview.removeAttribute("src");
+    downloads.classList.add("hidden");
+    fileList.innerHTML = "";
+    warningsEl.innerHTML = "";
+    passBadge.classList.add("hidden");
+    rejectBadge.classList.add("hidden");
+    infoBadge.classList.remove("hidden");
+
+    const rec = data.recommendation;
+    const labels = {
+      already_ok: "Already OK as-is",
+      convertible: "Not OK as-is · Convertible",
+      retake: "Retake required",
+    };
+    infoBadge.textContent = labels[rec] || rec;
+    infoBadge.className =
+      "info-badge " +
+      (rec === "already_ok" ? "ok" : rec === "convertible" ? "warn" : "bad");
+
+    metricsEl.innerHTML = "";
+    metricsEl.appendChild(pill("As-is", !!data.as_is?.passed));
+    metricsEl.appendChild(pill("Convertible", !!data.convertible?.passed));
+    metricsEl.appendChild(pill("Recommendation: " + (rec || "?"), rec !== "retake"));
+
+    validationBox.innerHTML = "";
+    const summary = document.createElement("p");
+    summary.className = "summary-text";
+    summary.textContent = data.summary || "";
+    validationBox.appendChild(summary);
+
+    validationBox.appendChild(
+      renderIssueList(
+        data.as_is?.passed
+          ? "As-is check — passed"
+          : "As-is check — failed (not passport-ready yet)",
+        data.as_is,
+        data.as_is?.passed ? "ok" : "bad"
+      )
+    );
+    validationBox.appendChild(
+      renderIssueList(
+        data.convertible?.passed
+          ? "Convertible check — passed (Convert can try)"
+          : "Convertible check — failed (cannot auto-fix)",
+        data.convertible,
+        data.convertible?.passed ? "ok" : "bad"
+      )
+    );
+  }
+
+  function renderConvertSuccess(data) {
     showResultShell();
     preview.classList.remove("hidden");
     preview.src = data.preview_data_url;
     passBadge.classList.remove("hidden");
     rejectBadge.classList.add("hidden");
+    infoBadge.classList.add("hidden");
     downloads.classList.remove("hidden");
 
     metricsEl.innerHTML = "";
     const m = data.metrics || {};
-    metricsEl.appendChild(pill("QC passed", true));
+    metricsEl.appendChild(pill("Final QC passed", true));
     metricsEl.appendChild(
       pill(`Head height: ${m.head_height_in}"`, m.head_height_ok === 1)
     );
@@ -148,7 +206,12 @@
       metricsEl.appendChild(pill(`Upload 600: ${m.upload_600_kb} KB`, true));
     }
 
-    renderValidation(data.validation, true);
+    validationBox.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "summary-text";
+    p.textContent =
+      "Converted and re-validated. Final photo passed automated Indian passport QC.";
+    validationBox.appendChild(p);
 
     warningsEl.innerHTML = "";
     if (data.warnings && data.warnings.length) {
@@ -171,18 +234,33 @@
     });
   }
 
-  function renderFailure(data) {
+  function renderConvertFailure(data) {
     showResultShell();
     preview.classList.add("hidden");
     preview.removeAttribute("src");
     passBadge.classList.add("hidden");
     rejectBadge.classList.remove("hidden");
+    infoBadge.classList.add("hidden");
     downloads.classList.add("hidden");
     fileList.innerHTML = "";
     metricsEl.innerHTML = "";
-    metricsEl.appendChild(pill("QC failed — no downloads", false));
+    metricsEl.appendChild(
+      pill(
+        data.error === "output_validation_failed"
+          ? "Converted but final QC failed"
+          : "Not convertible",
+        false
+      )
+    );
     warningsEl.innerHTML = "";
-    renderValidation(data.validation, false);
+    validationBox.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "summary-text";
+    p.textContent = data.message || "Conversion rejected.";
+    validationBox.appendChild(p);
+    validationBox.appendChild(
+      renderIssueList("Issues", data.validation, "bad")
+    );
   }
 
   async function refreshModelStatus() {
@@ -195,64 +273,77 @@
     }
   }
 
-  convertBtn.addEventListener("click", async () => {
-    if (!selectedFile) return;
-    convertBtn.disabled = true;
-    await refreshModelStatus();
-    if (!modelReady) {
-      setStatus(
-        "Validating… may download background model once (~170 MB)…",
-        ""
-      );
-    } else {
-      setStatus("Validating photo, then converting if it passes…", "");
-    }
-
+  async function postForm(url) {
     const form = new FormData();
     form.append("file", selectedFile);
     form.append("doc_type", docType.value);
     form.append("remove_bg", "true");
     form.append("strict", "true");
+    const res = await fetch(url, { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
 
+  checkBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+    setBusy(true);
+    setStatus("Checking photo (as-is + convertible)…", "");
     try {
-      const res = await fetch("/api/convert", { method: "POST", body: form });
-      const data = await res.json().catch(() => ({}));
+      const { res, data } = await postForm("/api/validate");
+      if (!res.ok) {
+        throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+      }
+      renderCheckResult(data);
+      const kind =
+        data.recommendation === "retake"
+          ? "error"
+          : data.recommendation === "convertible"
+            ? ""
+            : "ok";
+      setStatus(data.summary || "Check complete.", kind);
+    } catch (err) {
+      console.error(err);
+      setStatus(err.message || "Check failed.", "error");
+    } finally {
+      setBusy(false);
+    }
+  });
 
-      if (res.status === 422 || data.error === "validation_failed") {
-        renderFailure(data);
-        const n = (data.validation && data.validation.issues
-          ? data.validation.issues.length
-          : 0);
-        setStatus(
-          data.message ||
-            `Photo rejected (${n} issue${n === 1 ? "" : "s"}). Fix and retake.`,
-          "error"
-        );
+  convertBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+    setBusy(true);
+    await refreshModelStatus();
+    if (!modelReady) {
+      setStatus("Converting… may download model once (~170 MB)…", "");
+    } else {
+      setStatus("Checking convertible → converting → final QC…", "");
+    }
+    try {
+      const { res, data } = await postForm("/api/convert");
+      if (res.status === 422 || data.ok === false) {
+        renderConvertFailure(data);
+        setStatus(data.message || "Conversion rejected.", "error");
         return;
       }
-
       if (!res.ok) {
         const detail = data.detail;
-        const msg =
+        throw new Error(
           typeof detail === "string"
             ? detail
-            : Array.isArray(detail)
-              ? detail.map((d) => d.msg || d).join("; ")
-              : data.message || `HTTP ${res.status}`;
-        throw new Error(msg);
+            : data.message || `HTTP ${res.status}`
+        );
       }
-
-      renderSuccess(data);
+      renderConvertSuccess(data);
       modelReady = true;
       setStatus(
-        "Passed automated QC. Safe to download print + digital files.",
+        "Passed final QC. Download print + digital files below.",
         "ok"
       );
     } catch (err) {
       console.error(err);
       setStatus(err.message || "Conversion failed.", "error");
     } finally {
-      convertBtn.disabled = !selectedFile;
+      setBusy(false);
     }
   });
 

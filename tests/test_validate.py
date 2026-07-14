@@ -1,11 +1,17 @@
-"""Tests for strict passport validation."""
+"""Tests for as-is vs convertible validation and convert path."""
 
 import io
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.engine.specs import get_spec
-from app.engine.validate import PhotoValidationError, validate_source_photo
+from app.engine.validate import (
+    PhotoValidationError,
+    assess_photo,
+    validate_source_as_is,
+    validate_source_convertible,
+    validate_source_photo,
+)
 from app.engine.process import process_photo
 
 
@@ -23,24 +29,39 @@ def _tiny_image():
     return buf.getvalue()
 
 
-def test_blank_image_fails_validation():
+def test_blank_fails_as_is_and_convertible():
     im = Image.new("RGB", (800, 1000), (255, 255, 255))
-    report = validate_source_photo(im, get_spec("indian-passport"))
-    assert report.passed is False
-    codes = {i.code for i in report.issues}
-    assert "no_face" in codes
+    spec = get_spec("indian-passport")
+    as_is = validate_source_as_is(im, spec)
+    conv = validate_source_convertible(im, spec)
+    assert as_is.passed is False
+    assert conv.passed is False
+    assert any(i.code == "no_face" for i in conv.issues)
 
 
-def test_tiny_image_fails_resolution_or_face():
+def test_validate_source_photo_aliases_as_is():
+    im = Image.new("RGB", (800, 1000), (255, 255, 255))
+    spec = get_spec("indian-passport")
+    a = validate_source_photo(im, spec)
+    b = validate_source_as_is(im, spec)
+    assert a.passed == b.passed
+    assert a.stage == "source_as_is"
+
+
+def test_tiny_image_fails_convertible():
     im = Image.open(io.BytesIO(_tiny_image()))
-    report = validate_source_photo(im, get_spec("indian-passport"))
+    report = validate_source_convertible(im, get_spec("indian-passport"))
     assert report.passed is False
-    codes = {i.code for i in report.issues}
-    assert "resolution_too_low" in codes or "no_face" in codes
+
+
+def test_assess_photo_retake_on_blank():
+    im = Image.new("RGB", (800, 1000), (255, 255, 255))
+    a = assess_photo(im, get_spec("indian-passport"))
+    assert a["recommendation"] == "retake"
+    assert a["can_convert"] is False
 
 
 def test_process_photo_strict_raises_on_blank():
-    """No face → rejected before any downloads (no rembg needed)."""
     try:
         process_photo(_blank_image(), strict=True, remove_bg=True)
         assert False, "expected PhotoValidationError"

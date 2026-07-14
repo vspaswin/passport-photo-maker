@@ -11,14 +11,14 @@
     <header class="header">
       <div>
         <h1>Passport Photo Maker</h1>
-        <p class="tagline">Local · Private · Strict validation · Print + digital</p>
+        <p class="tagline">Local · Private · Check or convert · Indian passport</p>
       </div>
       <span class="badge">v{{ version }}</span>
     </header>
 
     <main class="grid">
       <section class="card">
-        <h2>1. Choose type</h2>
+        <h2>1. Document type</h2>
         <label class="field">
           <span>Document</span>
           <select id="docType">
@@ -28,10 +28,6 @@
           </select>
         </label>
         <p id="docDescription" class="hint"></p>
-        <p class="hint strict-note">
-          Strict QC is always on: if the photo could be rejected, conversion is
-          blocked and no download files are created.
-        </p>
       </section>
 
       <section class="card">
@@ -42,20 +38,28 @@
           <p class="hint">Front face · eyes open · good light · colour photo</p>
           <p id="fileName" class="file-name"></p>
         </div>
-        <button id="convertBtn" class="btn primary" disabled>Validate &amp; convert</button>
+        <div class="btn-row">
+          <button id="checkBtn" class="btn secondary" disabled>Check only</button>
+          <button id="convertBtn" class="btn primary" disabled>Convert to passport</button>
+        </div>
         <p id="status" class="status" aria-live="polite"></p>
+        <ul class="mode-help">
+          <li><strong>Check only</strong> — does it pass as-is? Can Convert fix it?</li>
+          <li><strong>Convert</strong> — if convertible, fix bg/crop, then final QC</li>
+        </ul>
       </section>
 
       <section class="card result-card">
         <h2>3. Result</h2>
         <div id="emptyState" class="empty">
-          Upload a photo. Downloads appear only after all automated checks pass.
+          Upload a photo, then Check or Convert.
         </div>
         <div id="result" class="result hidden">
           <div class="result-left">
             <img id="preview" alt="Passport photo preview" class="hidden" />
             <div id="rejectBadge" class="reject-badge hidden">Not submittable</div>
-            <div id="passBadge" class="pass-badge hidden">Passed automated QC</div>
+            <div id="passBadge" class="pass-badge hidden">Passed final QC</div>
+            <div id="infoBadge" class="info-badge hidden"></div>
           </div>
           <div class="result-right">
             <div class="metrics" id="metrics"></div>
@@ -71,17 +75,14 @@
     </main>
 
     <section class="card tips">
-      <h2>What we check (before you can download)</h2>
+      <h2>How validation works</h2>
       <ul>
-        <li>Exactly one clear face · frontal · both eyes open and level</li>
-        <li>Sharp (not blurry) · proper brightness · natural colour</li>
-        <li>Face size in frame · not clipped · not extreme close-up</li>
-        <li>No dark glasses · not pure white clothing</li>
-        <li>Clean plain white background on the final photo</li>
-        <li>Head height / geometry for 2×2 Indian passport (VFS / MEA style)</li>
+        <li><strong>As-is check</strong> — already looks like a passport photo (white bg, framing, eyes…)</li>
+        <li><strong>Convertible check</strong> — face/eyes/quality good enough for the converter to fix (messy room background is OK)</li>
+        <li><strong>After Convert</strong> — final 2×2 must pass full Indian passport QC or downloads are blocked</li>
       </ul>
       <p class="hint">
-        For home print on A4: after a pass, use <code>*_sheet_a4.jpg</code> at 100% scale.
+        Home print on A4: after a successful convert, use <code>*_sheet_a4.jpg</code> at 100% scale.
       </p>
     </section>
 

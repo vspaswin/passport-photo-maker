@@ -14,9 +14,9 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from app import __version__
-from app.engine.process import process_photo
-from app.engine.specs import list_document_types
-from app.engine.validate import PhotoValidationError
+from app.engine.process import load_image, process_photo
+from app.engine.specs import get_spec, list_document_types
+from app.engine.validate import PhotoValidationError, assess_photo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,13 +29,12 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 app = FastAPI(
     title="Passport Photo Maker",
-    description="Local tool: convert any photo into Indian passport (print + digital).",
+    description="Local tool: validate and convert photos for Indian passport (print + digital).",
     version=__version__,
 )
 
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
-# In-memory last result for simple download session (single-user local app)
 _LAST: dict = {}
 
 
@@ -52,7 +51,6 @@ async def index(request: Request):
 
 
 def _u2net_model_ready() -> bool:
-    """True if rembg's default u2net weights are already cached locally."""
     path = Path.home() / ".u2net" / "u2net.onnx"
     return path.is_file() and path.stat().st_size > 1_000_000
 
@@ -72,6 +70,7 @@ async def status():
         "model_name": "u2net",
         "model_path": str(Path.home() / ".u2net" / "u2net.onnx"),
         "strict_validation": True,
+        "modes": ["validate", "convert"],
     }
 
 
@@ -88,6 +87,47 @@ def _as_bool(value: Union[str, bool, None], default: bool = True) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+async def _read_upload(file: UploadFile) -> bytes:
+    if not file.content_type or not file.content_type.startswith("image/"):
+        if file.content_type not in (None, "application/octet-stream"):
+            raise HTTPException(400, "Please upload an image file (JPEG, PNG, etc.).")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file.")
+    if len(data) > 40 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 40 MB).")
+    return data
+
+
+@app.post("/api/validate")
+async def validate_only(
+    file: UploadFile = File(...),
+    doc_type: str = Form("indian-passport"),
+):
+    """Check-only: as-is passport readiness + whether Convert can fix it."""
+    data = await _read_upload(file)
+    try:
+        spec = get_spec(doc_type)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    try:
+        im = load_image(data)
+        assessment = assess_photo(im, spec)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Validate failed")
+        raise HTTPException(500, f"Validation failed: {exc}") from exc
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "mode": "validate",
+            "doc_type": doc_type,
+            **assessment,
+        }
+    )
+
+
 @app.post("/api/convert")
 async def convert(
     file: UploadFile = File(...),
@@ -95,18 +135,14 @@ async def convert(
     remove_bg: str = Form("true"),
     strict: str = Form("true"),
 ):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        if file.content_type not in (None, "application/octet-stream"):
-            raise HTTPException(400, "Please upload an image file (JPEG, PNG, etc.).")
-
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "Empty file.")
-    if len(data) > 40 * 1024 * 1024:
-        raise HTTPException(400, "File too large (max 40 MB).")
-
-    # Always require white-bg pipeline for submittable Indian passport photos
-    do_remove_bg = True
+    """
+    Convert path:
+      1) Must be *convertible* (face/eyes/quality)
+      2) Run converter (white bg + geometry)
+      3) Final output must pass full passport QC
+    """
+    data = await _read_upload(file)
+    do_remove_bg = True  # always for submittable Indian passport
     do_strict = _as_bool(strict, default=True)
 
     try:
@@ -117,15 +153,26 @@ async def convert(
             strict=do_strict,
         )
     except PhotoValidationError as exc:
-        logger.info("Validation rejected photo: %s", exc.message)
-        # Clear any previous successful downloads so user cannot re-download stale files
+        logger.info("Convert rejected: %s", exc.message)
         _LAST.clear()
+        stage = exc.report.stage
+        # Distinguish "can't convert" vs "converted but final failed QC"
+        if stage in ("source_convertible", "source", "source_as_is"):
+            error = "not_convertible"
+            message = exc.message
+        else:
+            error = "output_validation_failed"
+            message = (
+                "Converted, but the final photo still failed passport QC. "
+                + exc.message
+            )
         return JSONResponse(
             status_code=422,
             content={
                 "ok": False,
-                "error": "validation_failed",
-                "message": exc.message,
+                "mode": "convert",
+                "error": error,
+                "message": message,
                 "validation": exc.report.to_dict(),
                 "files": [],
             },
@@ -156,6 +203,7 @@ async def convert(
     return JSONResponse(
         {
             "ok": True,
+            "mode": "convert",
             "doc_type": result.doc_type,
             "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
             "metrics": result.metrics,
@@ -173,7 +221,7 @@ async def download(filename: str):
     if filename not in files:
         raise HTTPException(
             404,
-            "File not found. Convert a photo that passes validation first.",
+            "File not found. Convert a photo that passes final QC first.",
         )
     media = "application/zip" if filename.endswith(".zip") else "image/jpeg"
     return Response(
