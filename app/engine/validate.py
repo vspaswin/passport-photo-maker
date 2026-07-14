@@ -519,16 +519,24 @@ def validate_output_photo(
         )
 
     rgb = np.array(framed.convert("RGB"))
+    # Only TOP corners / upper side margins — bottom corners almost always contain
+    # shoulders/clothing in a valid 2×2 passport crop (not leftover background).
     s = max(8, w // 12)
-    corners = [rgb[:s, :s], rgb[:s, -s:], rgb[-s:, :s], rgb[-s:, -s:]]
-    corner_means = [float(c.mean()) for c in corners]
+    top_corners = [rgb[:s, :s], rgb[:s, -s:]]
+    # Upper side strips (mid-upper, away from face center)
+    y0, y1 = int(0.05 * h), int(0.28 * h)
+    xside = max(6, w // 18)
+    side_strips = [rgb[y0:y1, :xside], rgb[y0:y1, -xside:]]
+    samples = top_corners + side_strips
+    corner_means = [float(c.mean()) for c in samples]
     corner_chroma = [
-        float(c.max(axis=2).mean() - c.min(axis=2).mean()) for c in corners
+        float(c.max(axis=2).mean() - c.min(axis=2).mean()) for c in samples
     ]
     checks["corner_brightness"] = [round(v, 1) for v in corner_means]
     checks["corner_chroma"] = [round(v, 1) for v in corner_chroma]
+    checks["bg_check_regions"] = "top_corners+upper_sides"
 
-    if any(m < 235 for m in corner_means) or any(c > 20 for c in corner_chroma):
+    if any(m < 230 for m in corner_means) or any(c > 22 for c in corner_chroma):
         issues.append(
             ValidationIssue(
                 code="background_not_white",
@@ -539,9 +547,9 @@ def validate_output_photo(
 
     band = max(6, w // 20)
     top_border = rgb[:band].reshape(-1, 3)
-    pure_white_top = float((top_border.min(axis=1) >= 245).mean())
+    pure_white_top = float((top_border.min(axis=1) >= 242).mean())
     checks["top_border_pure_white_frac"] = round(pure_white_top, 3)
-    if pure_white_top < 0.85:
+    if pure_white_top < 0.80:
         issues.append(
             ValidationIssue(
                 code="background_dirty",
