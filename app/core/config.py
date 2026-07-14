@@ -8,6 +8,8 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_SECRET = "dev-change-me-in-production"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -19,7 +21,7 @@ class Settings(BaseSettings):
     app_name: str = "Passport Photo Maker"
     app_env: str = "development"  # development | production
     app_url: str = "http://127.0.0.1:8765"
-    secret_key: str = "dev-change-me-in-production"
+    secret_key: str = DEFAULT_SECRET
     host: str = "127.0.0.1"
     port: int = 8765
 
@@ -28,20 +30,22 @@ class Settings(BaseSettings):
     job_ttl_seconds: int = 3600
     max_upload_mb: int = 25
 
-    # Credits / freemium
+    # Credits / freemium (per client cookie)
     free_daily_checks: int = 20
     free_daily_converts: int = 3
     convert_credit_cost: int = 1
-    # Credit packs (Stripe): price_id optional until configured
+    # IP-level free caps (abuse control across cookie rotation)
+    ip_free_daily_checks: int = 40
+    ip_free_daily_converts: int = 6
+
     stripe_secret_key: Optional[str] = None
     stripe_webhook_secret: Optional[str] = None
-    stripe_price_starter: Optional[str] = None  # e.g. 10 credits
-    stripe_price_pro: Optional[str] = None  # e.g. 50 credits
+    stripe_price_starter: Optional[str] = None
+    stripe_price_pro: Optional[str] = None
     credit_pack_starter: int = 10
     credit_pack_pro: int = 50
 
-    # Engine
-    rembg_model: str = "u2net_human_seg"  # better for people; falls back to u2net
+    rembg_model: str = "u2net_human_seg"
     use_mediapipe: bool = True
 
     @property
@@ -60,7 +64,21 @@ class Settings(BaseSettings):
     def jobs_dir(self) -> Path:
         return self.data_dir / "jobs"
 
+    def validate_for_runtime(self) -> None:
+        """Fail fast on unsafe production configuration."""
+        if self.is_production:
+            if not self.secret_key or self.secret_key == DEFAULT_SECRET:
+                raise RuntimeError(
+                    "APP_ENV=production requires a strong SECRET_KEY "
+                    "(not the default dev-change-me-in-production)."
+                )
+            if self.app_url.startswith("http://127.") or "localhost" in self.app_url:
+                # warn-level only via exception? Allow but recommend — use RuntimeError soft
+                pass
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    s.validate_for_runtime()
+    return s

@@ -17,6 +17,7 @@ def pricing_public() -> Dict[str, Any]:
         "stripe_enabled": s.stripe_enabled,
         "free_daily_checks": s.free_daily_checks,
         "free_daily_converts": s.free_daily_converts,
+        "ip_free_daily_converts": s.ip_free_daily_converts,
         "convert_credit_cost": s.convert_credit_cost,
         "packs": [
             {
@@ -73,6 +74,7 @@ def create_checkout_session(
         metadata={"client_key": client_key, "credits": str(credits), "pack": pack_id},
         client_reference_id=client_key,
     )
+    # Persist before redirect so webhook can fulfill without double-credit path
     get_store().save_stripe_session(session.id, client_key, credits)
     return {"checkout_url": session.url, "session_id": session.id, "credits": credits}
 
@@ -89,20 +91,31 @@ def handle_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
         payload, sig_header, s.stripe_webhook_secret
     )
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        session_id = session["id"]
-        balance = get_store().fulfill_stripe_session(session_id)
-        if balance is None:
-            # Idempotent: already fulfilled or unknown
-            meta = session.get("metadata") or {}
-            client_key = meta.get("client_key") or session.get("client_reference_id")
-            credits = int(meta.get("credits") or 0)
-            if client_key and credits:
-                # Fallback if session row missing
-                balance = get_store().add_credits(client_key, credits)
-            else:
-                return {"ok": True, "fulfilled": False}
-        return {"ok": True, "fulfilled": True, "balance": balance}
+    if event["type"] != "checkout.session.completed":
+        return {"ok": True, "ignored": event["type"]}
 
-    return {"ok": True, "ignored": event["type"]}
+    session = event["data"]["object"]
+    session_id = session["id"]
+    meta = session.get("metadata") or {}
+    client_key = meta.get("client_key") or session.get("client_reference_id")
+    credits = int(meta.get("credits") or 0)
+
+    store = get_store()
+    # Ensure session row exists (webhook may arrive before our save in rare races)
+    if client_key and credits > 0:
+        store.save_stripe_session(session_id, client_key, credits)
+
+    credited, balance, status = store.fulfill_stripe_session(session_id)
+    logger.info(
+        "Stripe fulfill session=%s status=%s credited=%s balance=%s",
+        session_id,
+        status,
+        credited,
+        balance,
+    )
+    return {
+        "ok": True,
+        "fulfilled": credited,
+        "status": status,
+        "balance": balance,
+    }

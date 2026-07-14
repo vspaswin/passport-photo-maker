@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
 import secrets
@@ -27,10 +26,17 @@ from fastapi.templating import Jinja2Templates
 from app import __version__
 from app.billing import stripe_billing
 from app.core.config import get_settings
-from app.engine.process import load_image, process_photo
+from app.engine.process import load_image
 from app.engine.specs import get_spec, list_document_types
-from app.engine.validate import PhotoValidationError, assess_photo
-from app.jobs.store import get_store
+from app.engine.validate import assess_photo
+from app.jobs.store import QuotaExceeded, get_store
+from app.services.convert_service import (
+    PRINT_TIP,
+    ConvertFailure,
+    ConvertSuccess,
+    file_list_for_job,
+    run_convert,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,14 +63,25 @@ app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="stati
 CLIENT_COOKIE = "ppm_client"
 
 
+def _request_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _ip_key(request: Request) -> str:
+    ip = _request_ip(request)
+    return hashlib.sha256(f"ip:{ip}:{settings.secret_key}".encode()).hexdigest()[:32]
+
+
 def _client_key(
     request: Request,
     response: Response,
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ) -> str:
-    if ppm_client and len(ppm_client) >= 16:
+    if ppm_client and len(ppm_client) >= 16 and ppm_client.isalnum():
         return ppm_client
-    # Stable-ish anonymous id
     raw = secrets.token_hex(16)
     response.set_cookie(
         CLIENT_COOKIE,
@@ -75,14 +92,6 @@ def _client_key(
         secure=settings.is_production,
     )
     return raw
-
-
-def _ip_fallback(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    ip = (forwarded.split(",")[0].strip() if forwarded else None) or (
-        request.client.host if request.client else "unknown"
-    )
-    return hashlib.sha256(f"{ip}:{settings.secret_key}".encode()).hexdigest()[:32]
 
 
 async def _read_upload(file: UploadFile) -> bytes:
@@ -96,6 +105,52 @@ async def _read_upload(file: UploadFile) -> bytes:
     if len(data) > max_b:
         raise HTTPException(400, f"File too large (max {settings.max_upload_mb} MB).")
     return data
+
+
+def _success_payload(result: ConvertSuccess) -> dict:
+    files = file_list_for_job(result.job_id, result.files)
+    # Prefer job URL for preview; keep small data URL for UI convenience
+    import base64
+
+    preview_b64 = base64.b64encode(result.preview_jpeg).decode("ascii")
+    return {
+        "ok": True,
+        "mode": "convert",
+        "job_id": result.job_id,
+        "expires_at": result.expires_at,
+        "doc_type": result.doc_type,
+        "preview_url": f"/api/jobs/{result.job_id}/files/preview.jpg",
+        "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
+        "metrics": result.metrics,
+        "warnings": result.warnings,
+        "validation": result.validation,
+        "files": files,
+        "submittable": True,
+        "usage": result.usage,
+        "disclaimer": (
+            "Automated QC passed — not official government approval. "
+            "Verify likeness and print quality before submitting."
+        ),
+        "print_tip": {
+            "letter_file": f"{result.doc_type}{PRINT_TIP['letter_suffix']}",
+            "settings": PRINT_TIP["settings"],
+        },
+    }
+
+
+def _failure_response(fail: ConvertFailure) -> JSONResponse:
+    body = {
+        "ok": False,
+        "mode": "convert",
+        "error": fail.error,
+        "message": fail.message,
+        "usage": fail.usage,
+        "files": [],
+        "pricing": stripe_billing.pricing_public(),
+    }
+    if fail.validation is not None:
+        body["validation"] = fail.validation
+    return JSONResponse(status_code=fail.http_status, content=body)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -130,9 +185,9 @@ async def status(
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
-    usage = get_store().get_usage(key)
+    ipk = _ip_key(request)
+    usage = get_store().get_usage(key, ipk)
     model_path = Path.home() / ".u2net" / f"{settings.rembg_model}.onnx"
-    # human_seg stores as u2net_human_seg.onnx
     ready = model_path.is_file() or (Path.home() / ".u2net" / "u2net.onnx").is_file()
     return {
         "ok": True,
@@ -166,16 +221,23 @@ async def validate_only(
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
+    ipk = _ip_key(request)
     store = get_store()
-    ok, usage = store.can_check(key, settings.free_daily_checks)
-    if not ok:
+    try:
+        usage = store.try_record_check(
+            key,
+            ipk,
+            free_daily=settings.free_daily_checks,
+            ip_free_daily=settings.ip_free_daily_checks,
+        )
+    except QuotaExceeded as exc:
         return JSONResponse(
             status_code=429,
             content={
                 "ok": False,
                 "error": "check_quota",
-                "message": "Daily free checks used. Buy credits for unlimited checks.",
-                "usage": usage,
+                "message": exc.message,
+                "usage": exc.usage,
                 "pricing": stripe_billing.pricing_public(),
             },
         )
@@ -193,7 +255,6 @@ async def validate_only(
         logger.exception("Validate failed")
         raise HTTPException(500, f"Validation failed: {exc}") from exc
 
-    usage = store.record_check(key)
     return JSONResponse(
         {
             "ok": True,
@@ -218,114 +279,19 @@ async def convert(
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
-    store = get_store()
-    allowed, reason, usage = store.can_convert(
-        key, settings.free_daily_converts, settings.convert_credit_cost
-    )
-    if not allowed:
-        return JSONResponse(
-            status_code=402,
-            content={
-                "ok": False,
-                "error": "payment_required",
-                "message": reason,
-                "usage": usage,
-                "pricing": stripe_billing.pricing_public(),
-            },
-        )
-
+    ipk = _ip_key(request)
     data = await _read_upload(file)
 
-    try:
-        result = process_photo(data, doc_type=doc_type, remove_bg=True, strict=True)
-    except PhotoValidationError as exc:
-        logger.info("Convert rejected: %s", exc.message)
-        stage = exc.report.stage
-        error = (
-            "not_convertible"
-            if stage in ("source_convertible", "source", "source_as_is")
-            else "output_validation_failed"
-        )
-        message = exc.message
-        if error == "output_validation_failed":
-            message = (
-                "Converted, but the final photo still failed passport QC. " + message
-            )
-        return JSONResponse(
-            status_code=422,
-            content={
-                "ok": False,
-                "mode": "convert",
-                "error": error,
-                "message": message,
-                "validation": exc.report.to_dict(),
-                "usage": store.get_usage(key),
-                "files": [],
-            },
-        )
-    except KeyError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Processing failed")
-        raise HTTPException(500, f"Processing failed: {exc}") from exc
-
-    # Charge only after successful final QC
-    try:
-        usage = store.consume_convert(
-            key, settings.free_daily_converts, settings.convert_credit_cost
-        )
-    except RuntimeError:
-        usage = store.get_usage(key)
-
-    job_id = store.create_job(
-        doc_type=result.doc_type,
-        metrics=result.metrics,
-        validation=result.validation or {},
-        warnings=result.warnings,
-        files=result.files,
-        preview_jpeg=result.preview_jpeg,
+    outcome = run_convert(
+        get_store(),
+        client_key=key,
+        ip_key=ipk,
+        image_bytes=data,
+        doc_type=doc_type,
     )
-    meta = store.get_meta(job_id) or {}
-    file_list = [
-        {
-            "name": name,
-            "size_kb": round(len(result.files[name]) / 1024, 1),
-            "download_url": f"/api/jobs/{job_id}/files/{name}",
-        }
-        for name in sorted(result.files.keys())
-    ]
-    preview_b64 = base64.b64encode(result.preview_jpeg).decode("ascii")
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "mode": "convert",
-            "job_id": job_id,
-            "expires_at": meta.get("expires_at"),
-            "doc_type": result.doc_type,
-            "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
-            "metrics": result.metrics,
-            "warnings": result.warnings,
-            "validation": result.validation,
-            "files": file_list,
-            "submittable": True,
-            "usage": usage,
-            "disclaimer": (
-                "Automated QC passed — not official government approval. "
-                "Verify likeness and print quality before submitting."
-            ),
-            "print_tip": {
-                "letter_file": f"{result.doc_type}_sheet_letter.jpg",
-                "settings": [
-                    "Paper size: Letter (8.5×11)",
-                    "Paper type: Photo Glossy (Canon GP-701)",
-                    "Quality: High / Best (not Draft)",
-                    "Scale: 100% / Actual size (not Fit to Page)",
-                    "Load glossy side correctly; dry 1 minute before stacking",
-                ],
-            },
-        }
-    )
+    if isinstance(outcome, ConvertFailure):
+        return _failure_response(outcome)
+    return JSONResponse(_success_payload(outcome))
 
 
 @app.post("/api/batch")
@@ -336,64 +302,47 @@ async def batch_convert(
     doc_type: str = Form("indian-passport"),
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
-    """Convert multiple images; each successful convert costs a free slot or credit."""
     key = _client_key(request, response, ppm_client)
+    ipk = _ip_key(request)
     if len(files) > 20:
         raise HTTPException(400, "Max 20 files per batch.")
 
     store = get_store()
     results = []
     for f in files:
-        allowed, reason, usage = store.can_convert(
-            key, settings.free_daily_converts, settings.convert_credit_cost
-        )
-        entry = {"filename": f.filename, "ok": False}
-        if not allowed:
-            entry.update({"error": "payment_required", "message": reason, "usage": usage})
+        entry: dict = {"filename": f.filename, "ok": False}
+        try:
+            data = await _read_upload(f)
+        except HTTPException as exc:
+            entry["message"] = exc.detail if isinstance(exc.detail, str) else "Invalid file"
             results.append(entry)
             continue
-        try:
-            data = await f.read()
-            if not data:
-                entry["message"] = "Empty file"
-                results.append(entry)
-                continue
-            result = process_photo(data, doc_type=doc_type, remove_bg=True, strict=True)
-            usage = store.consume_convert(
-                key, settings.free_daily_converts, settings.convert_credit_cost
+
+        outcome = run_convert(
+            store,
+            client_key=key,
+            ip_key=ipk,
+            image_bytes=data,
+            doc_type=doc_type,
+        )
+        if isinstance(outcome, ConvertFailure):
+            entry.update(
+                {
+                    "error": outcome.error,
+                    "message": outcome.message,
+                    "validation": outcome.validation,
+                    "usage": outcome.usage,
+                }
             )
-            job_id = store.create_job(
-                doc_type=result.doc_type,
-                metrics=result.metrics,
-                validation=result.validation or {},
-                warnings=result.warnings,
-                files=result.files,
-                preview_jpeg=result.preview_jpeg,
-            )
+        else:
             entry.update(
                 {
                     "ok": True,
-                    "job_id": job_id,
-                    "files": [
-                        {
-                            "name": n,
-                            "download_url": f"/api/jobs/{job_id}/files/{n}",
-                        }
-                        for n in sorted(result.files.keys())
-                    ],
-                    "usage": usage,
+                    "job_id": outcome.job_id,
+                    "files": file_list_for_job(outcome.job_id, outcome.files),
+                    "usage": outcome.usage,
                 }
             )
-        except PhotoValidationError as exc:
-            entry.update(
-                {
-                    "error": "validation_failed",
-                    "message": exc.message,
-                    "validation": exc.report.to_dict(),
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            entry.update({"error": "failed", "message": str(exc)})
         results.append(entry)
 
     return {
@@ -402,15 +351,21 @@ async def batch_convert(
         "count": len(results),
         "passed": sum(1 for r in results if r.get("ok")),
         "results": results,
-        "usage": store.get_usage(key),
+        "usage": store.get_usage(key, ipk),
     }
 
 
 @app.get("/api/jobs/{job_id}")
-async def job_meta(job_id: str):
-    meta = get_store().get_meta(job_id)
+async def job_meta(
+    job_id: str,
+    request: Request,
+    response: Response,
+    ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
+):
+    key = _client_key(request, response, ppm_client)
+    meta = get_store().get_meta(job_id, owner_key=key)
     if not meta:
-        raise HTTPException(404, "Job not found or expired.")
+        raise HTTPException(404, "Job not found, expired, or not owned by this client.")
     return {
         "ok": True,
         "job_id": job_id,
@@ -423,14 +378,22 @@ async def job_meta(job_id: str):
             {"name": n, "download_url": f"/api/jobs/{job_id}/files/{n}"}
             for n in meta["files"]
         ],
+        "preview_url": f"/api/jobs/{job_id}/files/preview.jpg",
     }
 
 
 @app.get("/api/jobs/{job_id}/files/{filename}")
-async def job_file(job_id: str, filename: str):
-    blob = get_store().get_file(job_id, filename)
+async def job_file(
+    job_id: str,
+    filename: str,
+    request: Request,
+    response: Response,
+    ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
+):
+    key = _client_key(request, response, ppm_client)
+    blob = get_store().get_file(job_id, filename, owner_key=key)
     if blob is None:
-        raise HTTPException(404, "File not found or job expired.")
+        raise HTTPException(404, "File not found, expired, or not owned by this client.")
     media = "application/zip" if filename.endswith(".zip") else "image/jpeg"
     return Response(
         content=blob,
@@ -477,7 +440,12 @@ async def me(
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
-    return {"ok": True, "usage": get_store().get_usage(key), "pricing": stripe_billing.pricing_public()}
+    ipk = _ip_key(request)
+    return {
+        "ok": True,
+        "usage": get_store().get_usage(key, ipk),
+        "pricing": stripe_billing.pricing_public(),
+    }
 
 
 def run():
