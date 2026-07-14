@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Passport Photo Maker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>Passport Photo Maker</h1>
+        <p class="tagline">Local · Private · Print + digital ready</p>
+      </div>
+      <span class="badge">v{{ version }}</span>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>1. Choose type</h2>
+        <label class="field">
+          <span>Document</span>
+          <select id="docType">
+            {% for d in doc_types %}
+            <option value="{{ d.id }}">{{ d.title }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <p id="docDescription" class="hint"></p>
+        <label class="check">
+          <input type="checkbox" id="removeBg" checked />
+          Replace background with plain white
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>2. Upload photo</h2>
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <input type="file" id="fileInput" accept="image/*" hidden />
+          <p><strong>Drop a photo here</strong> or click to browse</p>
+          <p class="hint">JPEG / PNG · face the camera · good lighting</p>
+          <p id="fileName" class="file-name"></p>
+        </div>
+        <button id="convertBtn" class="btn primary" disabled>Convert photo</button>
+        <p id="status" class="status" aria-live="polite"></p>
+      </section>
+
+      <section class="card result-card">
+        <h2>3. Result</h2>
+        <div id="emptyState" class="empty">Preview and downloads appear here.</div>
+        <div id="result" class="result hidden">
+          <img id="preview" alt="Passport photo preview" />
+          <div class="metrics" id="metrics"></div>
+          <div id="warnings" class="warnings"></div>
+          <div class="downloads">
+            <h3>Downloads</h3>
+            <ul id="fileList"></ul>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="card tips">
+      <h2>Indian passport tips (VFS / MEA)</h2>
+      <ul>
+        <li><strong>2×2 inch</strong> colour photo, plain <strong>white</strong> background</li>
+        <li>Head height about <strong>1–1⅜ inch</strong>; eyes open, facing camera</li>
+        <li>Coloured clothes (not pure white); natural expression</li>
+        <li>Use <code>*_upload_600.jpg</code> for the website; print the 4×6 or A4 sheet for physical copies</li>
+        <li>Photos never leave your computer — processing is fully local</li>
+      </ul>
+    </section>
+
+    <footer class="footer">
+      <span>Open source · runs at <code>http://127.0.0.1:8765</code></span>
+    </footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
