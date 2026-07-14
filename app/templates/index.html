@@ -11,11 +11,11 @@
     <header class="header">
       <div>
         <h1>{{ app_name }}</h1>
-        <p class="tagline">Validate · Convert · Print · Freemium credits</p>
+        <p class="tagline">Professional passport photos — check, convert, fine-tune, print</p>
       </div>
       <div class="header-right">
         <span class="badge">v{{ version }}</span>
-        <div id="usageBox" class="usage-box">Loading usage…</div>
+        <div id="usageBox" class="usage-box">Loading…</div>
       </div>
     </header>
 
@@ -31,19 +31,23 @@
           </select>
         </label>
         <p id="docDescription" class="hint"></p>
+        <label class="check">
+          <input type="checkbox" id="childMode" />
+          Child mode (under 10 — relaxed VFS face/eye rules)
+        </label>
       </section>
 
       <section class="card">
-        <h2>2. Upload</h2>
+        <h2>2. Photo</h2>
         <div id="dropzone" class="dropzone" tabindex="0">
           <input type="file" id="fileInput" accept="image/*" hidden />
           <p><strong>Drop a photo</strong> or click to browse</p>
-          <p class="hint">Front face · eyes open · colour · good light</p>
+          <p class="hint">Front face · eyes open · colour · even light</p>
           <p id="fileName" class="file-name"></p>
         </div>
         <div class="btn-row">
           <button id="checkBtn" class="btn secondary" disabled>Check only</button>
-          <button id="convertBtn" class="btn primary" disabled>Convert to passport</button>
+          <button id="convertBtn" class="btn primary" disabled>Convert</button>
         </div>
         <div id="progress" class="progress hidden">
           <div class="progress-steps">
@@ -57,18 +61,49 @@
       </section>
 
       <section class="card result-card">
-        <h2>3. Result</h2>
+        <h2>3. Result &amp; fine-tune</h2>
         <div id="emptyState" class="empty">Upload a photo, then Check or Convert.</div>
         <div id="result" class="result hidden">
-          <div class="result-left">
-            <img id="preview" alt="Passport photo preview" class="hidden" />
-            <div id="rejectBadge" class="reject-badge hidden">Not submittable</div>
-            <div id="passBadge" class="pass-badge hidden">Passed automated QC</div>
-            <div id="infoBadge" class="info-badge hidden"></div>
+          <div class="compare">
+            <div class="compare-col">
+              <div class="compare-label">Original</div>
+              <img id="originalPreview" alt="Original" class="hidden" />
+            </div>
+            <div class="compare-col">
+              <div class="compare-label">Passport result</div>
+              <img id="preview" alt="Result" class="hidden" />
+              <img id="guidePreview" alt="With guides" class="hidden" />
+              <label class="check small">
+                <input type="checkbox" id="showGuides" />
+                Show geometry guides
+              </label>
+            </div>
           </div>
-          <div class="result-right">
+          <div class="result-right full">
+            <div id="passBadge" class="pass-badge hidden">Passed automated QC</div>
+            <div id="rejectBadge" class="reject-badge hidden">Not submittable</div>
+            <div id="infoBadge" class="info-badge hidden"></div>
             <div class="metrics" id="metrics"></div>
             <p id="disclaimer" class="disclaimer hidden"></p>
+
+            <div id="finetunePanel" class="finetune hidden">
+              <h3>Fine-tune framing</h3>
+              <p class="hint">Adjust without re-running AI background (free). Then re-validate &amp; re-export.</p>
+              <label class="slider-field">
+                <span>Head size <em id="scaleVal">1.00</em></span>
+                <input type="range" id="scaleSlider" min="0.80" max="1.25" step="0.01" value="1" />
+              </label>
+              <label class="slider-field">
+                <span>Shift horizontal <em id="oxVal">0.00</em></span>
+                <input type="range" id="oxSlider" min="-0.10" max="0.10" step="0.005" value="0" />
+              </label>
+              <label class="slider-field">
+                <span>Shift vertical <em id="oyVal">0.00</em></span>
+                <input type="range" id="oySlider" min="-0.10" max="0.10" step="0.005" value="0" />
+              </label>
+              <button id="reframeBtn" class="btn secondary">Apply fine-tune</button>
+            </div>
+
             <div id="validationBox" class="validation-box"></div>
             <div id="printGuide" class="print-guide hidden"></div>
             <div id="warnings" class="warnings"></div>
@@ -82,40 +117,42 @@
     </main>
 
     <section class="card tips">
-      <h2>Print on Canon GP-701 (Letter glossy 8.5×11)</h2>
+      <h2>Tool features</h2>
+      <ul>
+        <li><strong>Check</strong> — as-is passport readiness + whether Convert can fix it</li>
+        <li><strong>Convert</strong> — white background, ICAO framing, multi-format export</li>
+        <li><strong>Fine-tune</strong> — head size / position without re-charging or re-cutting bg</li>
+        <li><strong>Guides</strong> — eye line and head-size bands on the preview</li>
+        <li><strong>Print</strong> — Letter (GP-701), A4, 4×6 sheets + single 2×2</li>
+      </ul>
+      <h3>Canon GP-701 (Letter glossy)</h3>
       <ol class="print-ol">
-        <li>After Convert, download <code>*_sheet_letter.jpg</code> (not A4).</li>
-        <li>Print dialog: <strong>Letter</strong> + <strong>Photo Glossy</strong> + <strong>High/Best</strong>.</li>
-        <li>Scale: <strong>100% / Actual size</strong> — turn off Fit to Page.</li>
-        <li>Load glossy side correctly (check tray icon). Avoid Draft. Dry ~1 min before stacking.</li>
-        <li>Cut the 2×2 squares. Each photo is a true 2 inch × 2 inch print.</li>
+        <li>Download <code>*_sheet_letter.jpg</code></li>
+        <li>Letter + Photo Glossy + High/Best · scale 100%</li>
+        <li>Glossy side correct · no Draft · dry before stacking</li>
       </ol>
-      <p class="hint">Plain Letter paper: Letter + Plain/Stationery for layout tests only.</p>
     </section>
 
-    <section class="card tips" id="pricingCard">
-      <h2>Pricing</h2>
+    <details class="card tips billing-details">
+      <summary>Credits / free quota (optional)</summary>
       <p class="hint">
-        Free: {{ pricing.free_daily_checks }} checks / day, {{ pricing.free_daily_converts }} converts / day.
-        Each convert costs {{ pricing.convert_credit_cost }} credit after free quota.
+        Free: {{ pricing.free_daily_checks }} checks · {{ pricing.free_daily_converts }} converts / day
+        (plus IP caps). Stripe packs optional for production.
       </p>
       <div class="pack-row">
         {% for p in pricing.packs %}
         <div class="pack">
           <strong>{{ p.label }}</strong>
           <button class="btn secondary buy-btn" data-pack="{{ p.id }}" {% if not pricing.stripe_enabled %}disabled{% endif %}>
-            {% if pricing.stripe_enabled %}Buy{% else %}Stripe not configured{% endif %}
+            {% if pricing.stripe_enabled %}Buy{% else %}Stripe off{% endif %}
           </button>
         </div>
         {% endfor %}
       </div>
-      {% if not pricing.stripe_enabled %}
-      <p class="hint">Set <code>STRIPE_SECRET_KEY</code> and price IDs in <code>.env</code> to enable paid packs.</p>
-      {% endif %}
-    </section>
+    </details>
 
     <footer class="footer">
-      <span>Production-ready · local or cloud · <code>python -m app.main</code> · CLI: <code>python cli.py --help</code></span>
+      <span>Local or cloud · CLI: <code>python cli.py --help</code></span>
     </footer>
   </div>
   <script src="/static/app.js"></script>

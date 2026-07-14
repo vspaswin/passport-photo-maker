@@ -26,9 +26,9 @@ from fastapi.templating import Jinja2Templates
 from app import __version__
 from app.billing import stripe_billing
 from app.core.config import get_settings
-from app.engine.process import load_image
+from app.engine.process import load_image, reframe_photo
 from app.engine.specs import get_spec, list_document_types
-from app.engine.validate import assess_photo
+from app.engine.validate import PhotoValidationError, assess_photo
 from app.jobs.store import QuotaExceeded, get_store
 from app.services.convert_service import (
     PRINT_TIP,
@@ -108,10 +108,9 @@ async def _read_upload(file: UploadFile) -> bytes:
 
 
 def _success_payload(result: ConvertSuccess) -> dict:
-    files = file_list_for_job(result.job_id, result.files)
-    # Prefer job URL for preview; keep small data URL for UI convenience
     import base64
 
+    files = file_list_for_job(result.job_id, result.files)
     preview_b64 = base64.b64encode(result.preview_jpeg).decode("ascii")
     return {
         "ok": True,
@@ -120,12 +119,19 @@ def _success_payload(result: ConvertSuccess) -> dict:
         "expires_at": result.expires_at,
         "doc_type": result.doc_type,
         "preview_url": f"/api/jobs/{result.job_id}/files/preview.jpg",
+        "guide_url": f"/api/jobs/{result.job_id}/files/guide_preview.jpg",
+        "original_url": f"/api/jobs/{result.job_id}/files/original_thumb.jpg",
         "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
         "metrics": result.metrics,
         "warnings": result.warnings,
         "validation": result.validation,
         "files": files,
         "submittable": True,
+        "finetune": {
+            "scale_factor": result.metrics.get("scale_factor", 1.0),
+            "offset_x_frac": result.metrics.get("offset_x_frac", 0.0),
+            "offset_y_frac": result.metrics.get("offset_y_frac", 0.0),
+        },
         "usage": result.usage,
         "disclaimer": (
             "Automated QC passed — not official government approval. "
@@ -270,17 +276,34 @@ async def validate_only(
     )
 
 
+def _as_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @app.post("/api/convert")
 async def convert(
     request: Request,
     response: Response,
     file: UploadFile = File(...),
     doc_type: str = Form("indian-passport"),
+    child_mode: str = Form("false"),
+    scale_factor: str = Form("1.0"),
+    offset_x_frac: str = Form("0"),
+    offset_y_frac: str = Form("0"),
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
     ipk = _ip_key(request)
     data = await _read_upload(file)
+
+    try:
+        sf = float(scale_factor)
+        ox = float(offset_x_frac)
+        oy = float(offset_y_frac)
+    except ValueError:
+        raise HTTPException(400, "Invalid fine-tune parameters") from None
 
     outcome = run_convert(
         get_store(),
@@ -288,10 +311,102 @@ async def convert(
         ip_key=ipk,
         image_bytes=data,
         doc_type=doc_type,
+        child_mode=_as_bool(child_mode),
+        scale_factor=sf,
+        offset_x_frac=ox,
+        offset_y_frac=oy,
     )
     if isinstance(outcome, ConvertFailure):
         return _failure_response(outcome)
     return JSONResponse(_success_payload(outcome))
+
+
+@app.post("/api/jobs/{job_id}/reframe")
+async def reframe_job(
+    job_id: str,
+    request: Request,
+    response: Response,
+    scale_factor: str = Form("1.0"),
+    offset_x_frac: str = Form("0"),
+    offset_y_frac: str = Form("0"),
+    ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
+):
+    """Fine-tune framing without re-running background removal or charging credits."""
+    key = _client_key(request, response, ppm_client)
+    store = get_store()
+    inter = store.get_intermediate(job_id, key)
+    if not inter:
+        raise HTTPException(
+            404, "Job intermediate not found (expired, not owned, or old job)."
+        )
+    try:
+        sf = float(scale_factor)
+        ox = float(offset_x_frac)
+        oy = float(offset_y_frac)
+    except ValueError:
+        raise HTTPException(400, "Invalid fine-tune parameters") from None
+
+    try:
+        result = reframe_photo(
+            inter["prepared_png"],
+            inter["face_dict"],
+            inter["doc_type"],
+            scale_factor=sf,
+            offset_x_frac=ox,
+            offset_y_frac=oy,
+            child_mode=bool(inter.get("child_mode")),
+            strict=True,
+        )
+    except PhotoValidationError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "error": "output_validation_failed",
+                "message": exc.message,
+                "validation": exc.report.to_dict(),
+            },
+        )
+
+    store.replace_job_files(
+        job_id,
+        key,
+        files=result.files,
+        preview_jpeg=result.preview_jpeg,
+        guide_preview=result.guide_preview_jpeg,
+        metrics=result.metrics,
+        validation=result.validation or {},
+    )
+    # Build a ConvertSuccess-shaped payload
+    import base64
+
+    preview_b64 = base64.b64encode(result.preview_jpeg).decode("ascii")
+    return {
+        "ok": True,
+        "mode": "reframe",
+        "job_id": job_id,
+        "doc_type": result.doc_type,
+        "preview_url": f"/api/jobs/{job_id}/files/preview.jpg",
+        "guide_url": f"/api/jobs/{job_id}/files/guide_preview.jpg",
+        "original_url": f"/api/jobs/{job_id}/files/original_thumb.jpg",
+        "preview_data_url": f"data:image/jpeg;base64,{preview_b64}",
+        "metrics": result.metrics,
+        "validation": result.validation,
+        "files": file_list_for_job(job_id, result.files),
+        "submittable": True,
+        "finetune": {
+            "scale_factor": result.metrics.get("scale_factor", 1.0),
+            "offset_x_frac": result.metrics.get("offset_x_frac", 0.0),
+            "offset_y_frac": result.metrics.get("offset_y_frac", 0.0),
+        },
+        "disclaimer": (
+            "Reframed with automated QC. Not official government approval."
+        ),
+        "print_tip": {
+            "letter_file": f"{result.doc_type}{PRINT_TIP['letter_suffix']}",
+            "settings": PRINT_TIP["settings"],
+        },
+    }
 
 
 @app.post("/api/batch")
@@ -391,6 +506,9 @@ async def job_file(
     ppm_client: Optional[str] = Cookie(default=None, alias=CLIENT_COOKIE),
 ):
     key = _client_key(request, response, ppm_client)
+    safe_name = Path(filename).name
+    if safe_name in {"prepared.png", "face.json", "meta_extra.json"}:
+        raise HTTPException(404, "File not found.")
     blob = get_store().get_file(job_id, filename, owner_key=key)
     if blob is None:
         raise HTTPException(404, "File not found, expired, or not owned by this client.")

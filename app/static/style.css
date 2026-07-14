@@ -534,3 +534,76 @@ select {
   .pack-row { grid-template-columns: 1fr; }
   .header-right { align-items: flex-start; }
 }
+
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.compare-col img {
+  width: 100%;
+  max-width: 280px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: white;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+
+.compare-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.result-right.full {
+  grid-column: 1 / -1;
+}
+
+.finetune {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  margin: 0.75rem 0;
+}
+
+.finetune h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.55rem 0;
+  font-size: 0.9rem;
+}
+
+.slider-field em {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.slider-field input[type="range"] {
+  width: 100%;
+}
+
+.check.small {
+  font-size: 0.85rem;
+  margin-top: 0.45rem;
+}
+
+.billing-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+@media (max-width: 700px) {
+  .compare { grid-template-columns: 1fr; }
+}

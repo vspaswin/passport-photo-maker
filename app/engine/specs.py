@@ -139,8 +139,36 @@ INDIAN_PASSPORT = PhotoSpec(
     ),
 )
 
+# US passport also uses 2×2" with similar ICAO geometry (head ~1–1⅜").
+US_PASSPORT = PhotoSpec(
+    id="us-passport",
+    title="US Passport / Visa photo",
+    description=(
+        "2×2 inch colour photo, plain white or off-white background, "
+        "full face, front view (State Department / ICAO style)."
+    ),
+    photo_inches=(2.0, 2.0),
+    head_height_min=1.0 / 2.0,
+    head_height_max=1.375 / 2.0,
+    head_height_target=1.20 / 2.0,
+    eye_from_bottom_min=1.125 / 2.0,
+    eye_from_bottom_max=(1.0 + 1.0 / 3.0) / 2.0,
+    eye_from_bottom_target=1.22 / 2.0,
+    background_rgb=(255, 255, 255),
+    print_dpi=600,
+    print_px=1200,
+    upload_variants=INDIAN_PASSPORT.upload_variants,
+    print_sheets=INDIAN_PASSPORT.print_sheets,
+    notes=(
+        "Recent photo (within 6 months), neutral expression preferred.",
+        "No glasses with glare; head coverings only for religious reasons.",
+        "Print: Letter glossy sheet or single 2×2.",
+    ),
+)
+
 DOCUMENT_TYPES: Dict[str, PhotoSpec] = {
     INDIAN_PASSPORT.id: INDIAN_PASSPORT,
+    US_PASSPORT.id: US_PASSPORT,
 }
 
 

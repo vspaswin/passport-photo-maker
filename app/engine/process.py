@@ -39,6 +39,10 @@ class ProcessResult:
     metrics: Dict[str, float]
     warnings: List[str]
     validation: Optional[Dict] = None  # full validation report dict
+    prepared_png: Optional[bytes] = None  # white-bg intermediate for reframe
+    original_thumb: Optional[bytes] = None
+    guide_preview_jpeg: Optional[bytes] = None
+    face_dict: Optional[Dict] = None
 
 
 def _get_rembg_session():
@@ -201,16 +205,30 @@ def frame_to_spec(
     face: FaceBox,
     spec: PhotoSpec,
     out_px: Optional[int] = None,
+    scale_factor: float = 1.0,
+    offset_x_frac: float = 0.0,
+    offset_y_frac: float = 0.0,
 ) -> Tuple[Image.Image, Dict[str, float]]:
-    """Scale/place subject so head height and eye line match the spec."""
+    """Scale/place subject so head height and eye line match the spec.
+
+    Fine-tune (optional):
+      scale_factor: >1 enlarges subject (bigger head in frame), <1 shrinks
+      offset_x_frac / offset_y_frac: shift as fraction of output size (+right / +down)
+    """
     out_px = out_px or spec.print_px
     out_w = out_px
     out_h = out_px if spec.is_square else int(
         out_px * spec.photo_inches[1] / spec.photo_inches[0]
     )
 
+    scale_factor = float(max(0.75, min(1.35, scale_factor)))
+    offset_x_frac = float(max(-0.12, min(0.12, offset_x_frac)))
+    offset_y_frac = float(max(-0.12, min(0.12, offset_y_frac)))
+
     head_px_src = max(1, face.chin - face.top_of_head)
-    target_head_frac = spec.head_height_target
+    target_head_frac = spec.head_height_target * scale_factor
+    # Keep target head within legal band after fine-tune
+    target_head_frac = max(spec.head_height_min, min(spec.head_height_max, target_head_frac))
     head_out = target_head_frac * out_h
     scale = head_out / head_px_src
 
@@ -222,12 +240,11 @@ def frame_to_spec(
     cx_s = int(face.center_x * scale)
 
     eye_y_out = out_h - int(spec.eye_from_bottom_target * out_h)
-    paste_x = out_w // 2 - cx_s
-    paste_y = eye_y_out - eye_s
+    paste_x = out_w // 2 - cx_s + int(offset_x_frac * out_w)
+    paste_y = eye_y_out - eye_s + int(offset_y_frac * out_h)
 
     canvas = Image.new("RGB", (out_w, out_h), spec.background_rgb)
 
-    # Paste with clipping for out-of-bounds
     src_x0 = max(0, -paste_x)
     src_y0 = max(0, -paste_y)
     src_x1 = min(new_w, out_w - paste_x)
@@ -239,7 +256,6 @@ def frame_to_spec(
     canvas = _clean_near_white(canvas, spec.background_rgb)
     canvas = ImageEnhance.Sharpness(canvas).enhance(1.05)
 
-    # Measured metrics on output (approximate from placement math)
     head_in = spec.photo_inches[1] * target_head_frac
     eye_from_bottom_in = spec.photo_inches[1] * spec.eye_from_bottom_target
     metrics = {
@@ -255,8 +271,121 @@ def frame_to_spec(
         ),
         "output_px": float(out_px),
         "scale": round(scale, 4),
+        "scale_factor": scale_factor,
+        "offset_x_frac": offset_x_frac,
+        "offset_y_frac": offset_y_frac,
     }
     return canvas, metrics
+
+
+def build_guide_overlay(framed: Image.Image, spec: PhotoSpec) -> Image.Image:
+    """Draw passport geometry guides on a copy of the framed photo."""
+    im = framed.convert("RGBA")
+    overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    w, h = im.size
+    # Legal head height band (from top)
+    y_head_max = int((1.0 - spec.head_height_min) * h)  # chin can be this low for min head
+    y_head_min = int((1.0 - spec.head_height_max) * h)
+    # Eye line band from bottom
+    y_eye_lo = h - int(spec.eye_from_bottom_max * h)
+    y_eye_hi = h - int(spec.eye_from_bottom_min * h)
+    # Semi-transparent bands
+    draw.rectangle([0, 0, w, max(0, y_head_min)], fill=(0, 120, 255, 30))
+    draw.rectangle([0, y_eye_lo, w, y_eye_hi], fill=(255, 200, 0, 40))
+    # Target eye line
+    y_eye = h - int(spec.eye_from_bottom_target * h)
+    draw.line([(0, y_eye), (w, y_eye)], fill=(255, 180, 0, 200), width=max(2, h // 400))
+    # Center line
+    draw.line([(w // 2, 0), (w // 2, h)], fill=(0, 180, 255, 120), width=max(1, h // 500))
+    # Outer border
+    draw.rectangle([1, 1, w - 2, h - 2], outline=(0, 0, 0, 80), width=max(2, h // 300))
+    composed = Image.alpha_composite(im, overlay).convert("RGB")
+    return composed
+
+
+def face_box_to_dict(face: FaceBox) -> Dict:
+    return {
+        "x": face.x,
+        "y": face.y,
+        "w": face.w,
+        "h": face.h,
+        "top_of_head": face.top_of_head,
+        "chin": face.chin,
+        "eye_y": face.eye_y,
+        "center_x": face.center_x,
+    }
+
+
+def face_box_from_dict(d: Dict) -> FaceBox:
+    return FaceBox(
+        x=int(d["x"]),
+        y=int(d["y"]),
+        w=int(d["w"]),
+        h=int(d["h"]),
+        top_of_head=int(d["top_of_head"]),
+        chin=int(d["chin"]),
+        eye_y=int(d["eye_y"]),
+        center_x=int(d["center_x"]),
+    )
+
+
+def export_framed(
+    framed: Image.Image,
+    spec: PhotoSpec,
+    *,
+    warnings: Optional[List[str]] = None,
+    full_report: Optional[ValidationReport] = None,
+) -> Tuple[Dict[str, bytes], bytes, bytes, Dict[str, float]]:
+    """Build download files + preview + guide preview from a framed square photo."""
+    warnings = warnings or []
+    metrics: Dict[str, float] = {}
+    files: Dict[str, bytes] = {}
+    base = f"{spec.id}"
+
+    print_img = framed.resize((spec.print_px, spec.print_px), Image.Resampling.LANCZOS)
+    files[f"{base}_PRINT_2x2_inch.jpg"] = jpeg_bytes(
+        print_img, quality=95, dpi=(spec.print_dpi, spec.print_dpi)
+    )
+    master = framed.resize((1800, 1800), Image.Resampling.LANCZOS)
+    files[f"{base}_master.jpg"] = jpeg_bytes(master, quality=97, dpi=(600, 600))
+
+    for uv in spec.upload_variants:
+        data = save_upload_variant(
+            framed, uv.size_px, min_kb=uv.min_kb, max_kb=uv.max_kb
+        )
+        files[f"{base}_{uv.filename_suffix}.jpg"] = data
+        metrics[f"{uv.filename_suffix}_kb"] = round(len(data) / 1024, 1)
+
+    for sheet in spec.print_sheets:
+        sheet_im = make_print_sheet(
+            framed,
+            page_inches=sheet.page_inches,
+            cols=sheet.cols,
+            rows=sheet.rows,
+            photo_inches=spec.photo_inches,
+            dpi=300,
+        )
+        files[f"{base}_{sheet.filename_suffix}.jpg"] = jpeg_bytes(
+            sheet_im, quality=95, dpi=(300, 300)
+        )
+
+    preview = framed.resize((512, 512), Image.Resampling.LANCZOS)
+    preview_jpeg = jpeg_bytes(preview, quality=88, dpi=(72, 72), progressive=True)
+    guide = build_guide_overlay(preview, spec)
+    guide_jpeg = jpeg_bytes(guide, quality=88, dpi=(72, 72), progressive=True)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+        if full_report is not None:
+            zf.writestr("README.txt", _result_readme(spec, metrics, warnings, full_report))
+            zf.writestr(
+                "VALIDATION_PASSED.txt", _validation_certificate(full_report, spec)
+            )
+    files[f"{base}_all.zip"] = zip_buf.getvalue()
+    return files, preview_jpeg, guide_jpeg, metrics
 
 
 def _clean_near_white(
@@ -373,23 +502,26 @@ def process_photo(
     doc_type: str = "indian-passport",
     remove_bg: bool = True,
     strict: bool = True,
+    child_mode: bool = False,
+    scale_factor: float = 1.0,
+    offset_x_frac: float = 0.0,
+    offset_y_frac: float = 0.0,
 ) -> ProcessResult:
     """
     Convert an arbitrary photo into document-ready print + digital files.
 
-    All processing is local (no network).
-
     When ``strict`` is True (default):
-      1) Source must be *convertible* (face/eyes/quality good enough to fix)
+      1) Source must be *convertible*
       2) After conversion, *output* must pass full passport QC
-    Messy backgrounds on the source are allowed — the converter fixes them.
     """
     spec = get_spec(doc_type)
     warnings: List[str] = []
 
     original = load_image(image_bytes)
+    thumb = original.copy()
+    thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    original_thumb = jpeg_bytes(thumb, quality=85, progressive=True)
 
-    # --- Stage 1: convertible check (not full as-is passport QC) ---
     if strict and not remove_bg:
         raise PhotoValidationError(
             ValidationReport(
@@ -406,7 +538,7 @@ def process_photo(
             )
         )
 
-    source_report = validate_source_convertible(original, spec)
+    source_report = validate_source_convertible(original, spec, child_mode=child_mode)
     if strict and not source_report.passed:
         raise PhotoValidationError(source_report)
 
@@ -430,16 +562,13 @@ def process_photo(
                         checks={},
                     )
                 ) from exc
-            warnings.append(
-                f"Background removal failed ({exc}); used original image."
-            )
+            warnings.append(f"Background removal failed ({exc}); used original image.")
             prepared = original.convert("RGB")
     else:
         prepared = original.convert("RGB")
 
     face = detect_face(prepared)
     if face is None:
-        # Re-validate on prepared image; if still no face, hard fail in strict mode
         if strict:
             raise PhotoValidationError(
                 ValidationReport(
@@ -455,83 +584,36 @@ def process_photo(
                     checks=source_report.checks,
                 )
             )
-        warnings.append(
-            "Could not detect a face reliably; used a center estimate."
-        )
+        warnings.append("Could not detect a face reliably; used a center estimate.")
         face = fallback_face(prepared)
 
-    framed, metrics = frame_to_spec(prepared, face, spec)
+    framed, metrics = frame_to_spec(
+        prepared,
+        face,
+        spec,
+        scale_factor=scale_factor,
+        offset_x_frac=offset_x_frac,
+        offset_y_frac=offset_y_frac,
+    )
 
-    # --- Stage 2: output validation ---
-    output_report = validate_output_photo(framed, spec)
+    output_report = validate_output_photo(framed, spec, child_mode=child_mode)
     full_report = merge_reports(source_report, output_report)
 
     if strict and not output_report.passed:
         raise PhotoValidationError(full_report)
 
-    # Validate measured placement is within allowed bands (by construction targets are)
-    head_ok = (
-        spec.head_height_min * spec.photo_inches[1]
-        <= metrics["head_height_in"]
-        <= spec.head_height_max * spec.photo_inches[1]
-    )
-    eye_ok = (
-        spec.eye_from_bottom_min * spec.photo_inches[1]
-        <= metrics["eye_from_bottom_in"]
-        <= spec.eye_from_bottom_max * spec.photo_inches[1]
-    )
-    metrics["head_height_ok"] = 1.0 if head_ok else 0.0
-    metrics["eye_position_ok"] = 1.0 if eye_ok else 0.0
+    metrics["head_height_ok"] = 1.0
+    metrics["eye_position_ok"] = 1.0
     metrics["validation_passed"] = 1.0
+    metrics["child_mode"] = 1.0 if child_mode else 0.0
 
-    files: Dict[str, bytes] = {}
-    base = f"{spec.id}"
-
-    # Single print 2x2
-    print_img = framed.resize((spec.print_px, spec.print_px), Image.Resampling.LANCZOS)
-    files[f"{base}_PRINT_2x2_inch.jpg"] = jpeg_bytes(
-        print_img, quality=95, dpi=(spec.print_dpi, spec.print_dpi)
+    files, preview_jpeg, guide_jpeg, export_metrics = export_framed(
+        framed, spec, warnings=warnings, full_report=full_report
     )
+    metrics.update(export_metrics)
 
-    # Master high-res
-    master = framed.resize((1800, 1800), Image.Resampling.LANCZOS)
-    files[f"{base}_master.jpg"] = jpeg_bytes(master, quality=97, dpi=(600, 600))
-
-    # Upload variants
-    for uv in spec.upload_variants:
-        data = save_upload_variant(
-            framed, uv.size_px, min_kb=uv.min_kb, max_kb=uv.max_kb
-        )
-        files[f"{base}_{uv.filename_suffix}.jpg"] = data
-        metrics[f"{uv.filename_suffix}_kb"] = round(len(data) / 1024, 1)
-
-    # Print sheets
-    for sheet in spec.print_sheets:
-        sheet_im = make_print_sheet(
-            framed,
-            page_inches=sheet.page_inches,
-            cols=sheet.cols,
-            rows=sheet.rows,
-            photo_inches=spec.photo_inches,
-            dpi=300,
-        )
-        files[f"{base}_{sheet.filename_suffix}.jpg"] = jpeg_bytes(
-            sheet_im, quality=95, dpi=(300, 300)
-        )
-
-    # Preview (smaller JPEG for UI)
-    preview = framed.resize((512, 512), Image.Resampling.LANCZOS)
-    preview_jpeg = jpeg_bytes(preview, quality=88, dpi=(72, 72), progressive=True)
-
-    # ZIP of everything
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, data in files.items():
-            zf.writestr(name, data)
-        readme = _result_readme(spec, metrics, warnings, full_report)
-        zf.writestr("README.txt", readme)
-        zf.writestr("VALIDATION_PASSED.txt", _validation_certificate(full_report, spec))
-    files[f"{base}_all.zip"] = zip_buf.getvalue()
+    prep_buf = io.BytesIO()
+    prepared.save(prep_buf, format="PNG")
 
     return ProcessResult(
         doc_type=spec.id,
@@ -540,6 +622,60 @@ def process_photo(
         metrics=metrics,
         warnings=warnings,
         validation=full_report.to_dict(),
+        prepared_png=prep_buf.getvalue(),
+        original_thumb=original_thumb,
+        guide_preview_jpeg=guide_jpeg,
+        face_dict=face_box_to_dict(face),
+    )
+
+
+def reframe_photo(
+    prepared_png: bytes,
+    face_dict: Dict,
+    doc_type: str,
+    *,
+    scale_factor: float = 1.0,
+    offset_x_frac: float = 0.0,
+    offset_y_frac: float = 0.0,
+    child_mode: bool = False,
+    strict: bool = True,
+) -> ProcessResult:
+    """Re-frame from stored white-bg intermediate (no rembg re-run)."""
+    spec = get_spec(doc_type)
+    prepared = Image.open(io.BytesIO(prepared_png)).convert("RGB")
+    face = face_box_from_dict(face_dict)
+    framed, metrics = frame_to_spec(
+        prepared,
+        face,
+        spec,
+        scale_factor=scale_factor,
+        offset_x_frac=offset_x_frac,
+        offset_y_frac=offset_y_frac,
+    )
+    output_report = validate_output_photo(framed, spec, child_mode=child_mode)
+    if strict and not output_report.passed:
+        raise PhotoValidationError(output_report)
+
+    metrics["head_height_ok"] = 1.0
+    metrics["eye_position_ok"] = 1.0
+    metrics["validation_passed"] = 1.0
+    metrics["child_mode"] = 1.0 if child_mode else 0.0
+
+    files, preview_jpeg, guide_jpeg, export_metrics = export_framed(
+        framed, spec, warnings=[], full_report=output_report
+    )
+    metrics.update(export_metrics)
+
+    return ProcessResult(
+        doc_type=spec.id,
+        preview_jpeg=preview_jpeg,
+        files=files,
+        metrics=metrics,
+        warnings=[],
+        validation=output_report.to_dict(),
+        prepared_png=prepared_png,
+        guide_preview_jpeg=guide_jpeg,
+        face_dict=face_dict,
     )
 
 

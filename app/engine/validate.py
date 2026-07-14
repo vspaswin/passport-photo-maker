@@ -137,6 +137,31 @@ CONVERTIBLE = SourcePolicy(
     min_lower_face_std=0.0,
 )
 
+# VFS relaxes face height / eye position for children under 10.
+CHILD_CONVERTIBLE = SourcePolicy(
+    stage="source_convertible",
+    min_side=250,
+    min_face_area=0.008,
+    max_face_area=None,
+    check_centering=False,
+    max_center_offset=1.0,
+    check_clip=False,
+    min_laplacian=8.0,
+    min_brightness=22.0,
+    max_brightness=235.0,
+    max_dark_frac=None,
+    max_bright_frac=None,
+    min_skin=0.015,
+    max_eye_tilt=0.22,
+    min_eye_sep=None,
+    max_white_clothing=0.80,
+    min_colourfulness=3.0,
+    check_corners_white=False,
+    min_corner_brightness=0.0,
+    check_lower_face=False,
+    min_lower_face_std=0.0,
+)
+
 
 def apply_source_policy(analysis: FaceAnalysis, policy: SourcePolicy) -> ValidationReport:
     """Map one FaceAnalysis through a threshold policy → issues."""
@@ -353,10 +378,12 @@ def validate_source_convertible(
     im: Image.Image,
     spec: PhotoSpec,
     analysis: Optional[FaceAnalysis] = None,
+    child_mode: bool = False,
 ) -> ValidationReport:
     """Lighter check: can Convert likely produce a valid passport photo?"""
     a = analysis or analyze_image(im)
-    return apply_source_policy(a, CONVERTIBLE)
+    policy = CHILD_CONVERTIBLE if child_mode else CONVERTIBLE
+    return apply_source_policy(a, policy)
 
 
 def validate_source_photo(
@@ -403,10 +430,14 @@ def assess_photo(im: Image.Image, spec: PhotoSpec) -> Dict[str, Any]:
     }
 
 
-def validate_output_photo(framed: Image.Image, spec: PhotoSpec) -> ValidationReport:
+def validate_output_photo(
+    framed: Image.Image,
+    spec: PhotoSpec,
+    child_mode: bool = False,
+) -> ValidationReport:
     """Validate final 2×2 framed result before offering downloads."""
     issues: List[ValidationIssue] = []
-    checks: Dict[str, Any] = {}
+    checks: Dict[str, Any] = {"child_mode": child_mode}
     w, h = framed.size
     checks["output_size"] = [w, h]
 
@@ -451,8 +482,9 @@ def validate_output_photo(framed: Image.Image, spec: PhotoSpec) -> ValidationRep
     checks["output_head_height_frac"] = round(head_frac, 3)
     checks["output_head_height_in"] = round(head_frac * spec.photo_inches[1], 3)
 
-    min_h = spec.head_height_min * 0.90
-    max_h = spec.head_height_max * 1.12
+    # Children: VFS allows relaxed face height / eye position
+    min_h = spec.head_height_min * (0.75 if child_mode else 0.90)
+    max_h = spec.head_height_max * (1.25 if child_mode else 1.12)
     if head_frac < min_h or head_frac > max_h:
         issues.append(
             ValidationIssue(
@@ -463,18 +495,26 @@ def validate_output_photo(framed: Image.Image, spec: PhotoSpec) -> ValidationRep
                     f"{spec.head_height_min * spec.photo_inches[1]:.2f}–"
                     f"{spec.head_height_max * spec.photo_inches[1]:.2f}\")."
                 ),
-                how_to_fix="Retake with head fully visible (hair to chin) and shoulders; avoid extreme close-ups.",
+                how_to_fix="Retake with head fully visible (hair to chin) and shoulders; avoid extreme close-ups. Or use Fine-tune sliders.",
             )
         )
 
     eyes = detect_eyes(gray, primary)
     checks["output_eye_count"] = len(eyes)
-    if len(eyes) < 2:
+    if len(eyes) < 2 and not child_mode:
         issues.append(
             ValidationIssue(
                 code="output_eyes",
                 message="Both eyes are not clearly visible in the final photo.",
                 how_to_fix="Retake looking at the camera with eyes open and hair off the face.",
+            )
+        )
+    elif len(eyes) < 1:
+        issues.append(
+            ValidationIssue(
+                code="output_eyes",
+                message="No eyes clearly visible in the final photo.",
+                how_to_fix="Retake looking at the camera with eyes open.",
             )
         )
 

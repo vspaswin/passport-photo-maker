@@ -1,33 +1,49 @@
 (() => {
-  const docType = document.getElementById("docType");
-  const docDescription = document.getElementById("docDescription");
-  const dropzone = document.getElementById("dropzone");
-  const fileInput = document.getElementById("fileInput");
-  const fileName = document.getElementById("fileName");
-  const checkBtn = document.getElementById("checkBtn");
-  const convertBtn = document.getElementById("convertBtn");
-  const status = document.getElementById("status");
-  const emptyState = document.getElementById("emptyState");
-  const result = document.getElementById("result");
-  const preview = document.getElementById("preview");
-  const metricsEl = document.getElementById("metrics");
-  const warningsEl = document.getElementById("warnings");
-  const fileList = document.getElementById("fileList");
-  const downloads = document.getElementById("downloads");
-  const validationBox = document.getElementById("validationBox");
-  const rejectBadge = document.getElementById("rejectBadge");
-  const passBadge = document.getElementById("passBadge");
-  const infoBadge = document.getElementById("infoBadge");
-  const usageBox = document.getElementById("usageBox");
-  const progress = document.getElementById("progress");
-  const disclaimer = document.getElementById("disclaimer");
-  const printGuide = document.getElementById("printGuide");
+  const $ = (id) => document.getElementById(id);
+  const docType = $("docType");
+  const docDescription = $("docDescription");
+  const childMode = $("childMode");
+  const dropzone = $("dropzone");
+  const fileInput = $("fileInput");
+  const fileName = $("fileName");
+  const checkBtn = $("checkBtn");
+  const convertBtn = $("convertBtn");
+  const reframeBtn = $("reframeBtn");
+  const status = $("status");
+  const emptyState = $("emptyState");
+  const result = $("result");
+  const preview = $("preview");
+  const guidePreview = $("guidePreview");
+  const originalPreview = $("originalPreview");
+  const showGuides = $("showGuides");
+  const metricsEl = $("metrics");
+  const warningsEl = $("warnings");
+  const fileList = $("fileList");
+  const downloads = $("downloads");
+  const validationBox = $("validationBox");
+  const rejectBadge = $("rejectBadge");
+  const passBadge = $("passBadge");
+  const infoBadge = $("infoBadge");
+  const usageBox = $("usageBox");
+  const progress = $("progress");
+  const disclaimer = $("disclaimer");
+  const printGuide = $("printGuide");
+  const finetunePanel = $("finetunePanel");
+  const scaleSlider = $("scaleSlider");
+  const oxSlider = $("oxSlider");
+  const oySlider = $("oySlider");
+  const scaleVal = $("scaleVal");
+  const oxVal = $("oxVal");
+  const oyVal = $("oyVal");
 
   let selectedFile = null;
+  let currentJobId = null;
 
   const DESCRIPTIONS = {
     "indian-passport":
       "Indian Passport / Visa / OCI — 2×2\", white background, VFS/MEA geometry.",
+    "us-passport":
+      "US Passport / Visa — 2×2\", white background, ICAO-style geometry.",
   };
 
   function setStatus(msg, kind) {
@@ -38,20 +54,22 @@
   function setBusy(busy) {
     checkBtn.disabled = busy || !selectedFile;
     convertBtn.disabled = busy || !selectedFile;
+    if (reframeBtn) reframeBtn.disabled = busy || !currentJobId;
   }
 
   function setProgress(active) {
     if (!active) {
       progress.classList.add("hidden");
-      progress.querySelectorAll("[data-step]").forEach((el) => el.classList.remove("on", "done"));
+      progress.querySelectorAll("[data-step]").forEach((el) =>
+        el.classList.remove("on", "done")
+      );
       return;
     }
     progress.classList.remove("hidden");
     const order = ["check", "bg", "frame", "qc"];
     const idx = order.indexOf(active);
     progress.querySelectorAll("[data-step]").forEach((el) => {
-      const step = el.getAttribute("data-step");
-      const si = order.indexOf(step);
+      const si = order.indexOf(el.getAttribute("data-step"));
       el.classList.toggle("on", si === idx);
       el.classList.toggle("done", si < idx);
     });
@@ -62,15 +80,15 @@
   }
 
   function setFile(file) {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
+    if (!file || !file.type.startsWith("image/")) {
       setStatus("Please choose an image file.", "error");
       return;
     }
     selectedFile = file;
+    currentJobId = null;
     fileName.textContent = file.name + " · " + Math.round(file.size / 1024) + " KB";
     setBusy(false);
-    setStatus("Ready — Check only, or Convert to passport.");
+    setStatus("Ready — Check or Convert.");
   }
 
   dropzone.addEventListener("click", () => fileInput.click());
@@ -81,7 +99,7 @@
     }
   });
   fileInput.addEventListener("change", () => {
-    if (fileInput.files && fileInput.files[0]) setFile(fileInput.files[0]);
+    if (fileInput.files?.[0]) setFile(fileInput.files[0]);
   });
   ["dragenter", "dragover"].forEach((evt) => {
     dropzone.addEventListener(evt, (e) => {
@@ -96,8 +114,7 @@
     });
   });
   dropzone.addEventListener("drop", (e) => {
-    const f = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f) setFile(f);
+    if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0]);
   });
 
   function pill(label, ok) {
@@ -160,20 +177,51 @@
 
   async function refreshStatus() {
     try {
-      const res = await fetch("/api/status");
+      const res = await fetch("/api/status", { credentials: "same-origin" });
       const data = await res.json();
       updateUsage(data.usage);
     } catch (_) {}
   }
 
+  function syncSliders(ft) {
+    if (!ft) return;
+    scaleSlider.value = ft.scale_factor ?? 1;
+    oxSlider.value = ft.offset_x_frac ?? 0;
+    oySlider.value = ft.offset_y_frac ?? 0;
+    scaleVal.textContent = Number(scaleSlider.value).toFixed(2);
+    oxVal.textContent = Number(oxSlider.value).toFixed(3);
+    oyVal.textContent = Number(oySlider.value).toFixed(3);
+  }
+
+  [scaleSlider, oxSlider, oySlider].forEach((el) => {
+    el.addEventListener("input", () => {
+      scaleVal.textContent = Number(scaleSlider.value).toFixed(2);
+      oxVal.textContent = Number(oxSlider.value).toFixed(3);
+      oyVal.textContent = Number(oySlider.value).toFixed(3);
+    });
+  });
+
+  function toggleGuides() {
+    const on = showGuides.checked;
+    if (on && guidePreview.src) {
+      preview.classList.add("hidden");
+      guidePreview.classList.remove("hidden");
+    } else {
+      guidePreview.classList.add("hidden");
+      if (preview.src) preview.classList.remove("hidden");
+    }
+  }
+  showGuides.addEventListener("change", toggleGuides);
+
   function renderCheckResult(data) {
     showResultShell();
     setProgress(null);
+    currentJobId = null;
+    finetunePanel.classList.add("hidden");
     preview.classList.add("hidden");
-    preview.removeAttribute("src");
+    guidePreview.classList.add("hidden");
+    originalPreview.classList.add("hidden");
     downloads.classList.add("hidden");
-    fileList.innerHTML = "";
-    warningsEl.innerHTML = "";
     printGuide.classList.add("hidden");
     passBadge.classList.add("hidden");
     rejectBadge.classList.add("hidden");
@@ -182,12 +230,12 @@
     disclaimer.textContent = data.disclaimer || "";
 
     const rec = data.recommendation;
-    const labels = {
-      already_ok: "Already OK as-is",
-      convertible: "Not OK as-is · Convertible",
-      retake: "Retake required",
-    };
-    infoBadge.textContent = labels[rec] || rec;
+    infoBadge.textContent =
+      rec === "already_ok"
+        ? "Already OK as-is"
+        : rec === "convertible"
+          ? "Convertible"
+          : "Retake required";
     infoBadge.className =
       "info-badge " +
       (rec === "already_ok" ? "ok" : rec === "convertible" ? "warn" : "bad");
@@ -210,9 +258,7 @@
     );
     validationBox.appendChild(
       renderIssueList(
-        data.convertible?.passed
-          ? "Convertible — passed"
-          : "Convertible — failed",
+        data.convertible?.passed ? "Convertible — passed" : "Convertible — failed",
         data.convertible,
         data.convertible?.passed ? "ok" : "bad"
       )
@@ -223,47 +269,60 @@
   function renderConvertSuccess(data) {
     showResultShell();
     setProgress(null);
-    preview.classList.remove("hidden");
-    preview.src = data.preview_data_url;
+    currentJobId = data.job_id || null;
     passBadge.classList.remove("hidden");
     rejectBadge.classList.add("hidden");
     infoBadge.classList.add("hidden");
     downloads.classList.remove("hidden");
+    finetunePanel.classList.toggle("hidden", !currentJobId);
     disclaimer.classList.remove("hidden");
     disclaimer.textContent = data.disclaimer || "";
+    syncSliders(data.finetune);
+
+    preview.classList.remove("hidden");
+    preview.src = data.preview_data_url || data.preview_url || "";
+    if (data.guide_url) {
+      guidePreview.src = data.guide_url + "?t=" + Date.now();
+    }
+    if (data.original_url) {
+      originalPreview.src = data.original_url + "?t=" + Date.now();
+      originalPreview.classList.remove("hidden");
+    }
+    showGuides.checked = false;
+    toggleGuides();
 
     metricsEl.innerHTML = "";
     const m = data.metrics || {};
-    metricsEl.appendChild(pill("Final QC passed", true));
-    if (data.job_id) metricsEl.appendChild(pill("Job " + data.job_id.slice(0, 8), true));
-    metricsEl.appendChild(pill(`Head: ${m.head_height_in}"`, m.head_height_ok === 1));
-    if (m.upload_600_kb != null) {
-      metricsEl.appendChild(pill(`Upload 600: ${m.upload_600_kb} KB`, true));
-    }
+    metricsEl.appendChild(pill("QC passed", true));
+    if (data.job_id)
+      metricsEl.appendChild(pill("Job " + data.job_id.slice(0, 8), true));
+    metricsEl.appendChild(pill(`Head: ${m.head_height_in}"`, true));
+    if (m.upload_600_kb != null)
+      metricsEl.appendChild(pill(`Upload: ${m.upload_600_kb} KB`, true));
 
     validationBox.innerHTML = "";
     const p = document.createElement("p");
     p.className = "summary-text";
     p.textContent =
-      "Converted and re-validated. Ready for portal upload and physical print.";
+      data.mode === "reframe"
+        ? "Reframed and re-validated. Downloads updated."
+        : "Converted and validated. Fine-tune framing if needed, then download.";
     validationBox.appendChild(p);
 
     if (data.print_tip) {
       printGuide.classList.remove("hidden");
       printGuide.innerHTML =
-        `<h3>Print guide (Letter / GP-701)</h3><p>Use <code>${escapeHtml(
+        `<h3>Print (Letter / GP-701)</h3><p>Use <code>${escapeHtml(
           data.print_tip.letter_file || "*_sheet_letter.jpg"
         )}</code></p><ul>` +
         (data.print_tip.settings || [])
           .map((s) => `<li>${escapeHtml(s)}</li>`)
           .join("") +
         "</ul>";
-    } else {
-      printGuide.classList.add("hidden");
     }
 
     warningsEl.innerHTML = "";
-    if (data.warnings && data.warnings.length) {
+    if (data.warnings?.length) {
       warningsEl.innerHTML = data.warnings.map((w) => `<div>⚠ ${w}</div>`).join("");
     }
 
@@ -282,32 +341,25 @@
       fileList.appendChild(li);
     });
     updateUsage(data.usage);
+    setBusy(false);
   }
 
   function renderConvertFailure(data) {
     showResultShell();
     setProgress(null);
+    currentJobId = null;
+    finetunePanel.classList.add("hidden");
     preview.classList.add("hidden");
-    preview.removeAttribute("src");
+    guidePreview.classList.add("hidden");
+    originalPreview.classList.add("hidden");
     passBadge.classList.add("hidden");
     rejectBadge.classList.remove("hidden");
     infoBadge.classList.add("hidden");
     downloads.classList.add("hidden");
     printGuide.classList.add("hidden");
-    fileList.innerHTML = "";
     metricsEl.innerHTML = "";
-    metricsEl.appendChild(
-      pill(
-        data.error === "payment_required"
-          ? "Credits required"
-          : data.error === "output_validation_failed"
-            ? "Final QC failed"
-            : "Not convertible",
-        false
-      )
-    );
+    metricsEl.appendChild(pill(data.error || "Failed", false));
     disclaimer.classList.add("hidden");
-    warningsEl.innerHTML = "";
     validationBox.innerHTML = "";
     const p = document.createElement("p");
     p.className = "summary-text";
@@ -319,33 +371,40 @@
     updateUsage(data.usage);
   }
 
-  async function postForm(url) {
+  function formBase() {
     const form = new FormData();
-    form.append("file", selectedFile);
     form.append("doc_type", docType.value);
-    const res = await fetch(url, { method: "POST", body: form, credentials: "same-origin" });
-    const data = await res.json().catch(() => ({}));
-    return { res, data };
+    form.append("child_mode", childMode.checked ? "true" : "false");
+    form.append("scale_factor", scaleSlider.value);
+    form.append("offset_x_frac", oxSlider.value);
+    form.append("offset_y_frac", oySlider.value);
+    return form;
   }
 
   checkBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     setBusy(true);
     setProgress("check");
-    setStatus("Checking photo…", "");
+    setStatus("Checking…", "");
     try {
-      const { res, data } = await postForm("/api/validate");
+      const form = formBase();
+      form.append("file", selectedFile);
+      const res = await fetch("/api/validate", {
+        method: "POST",
+        body: form,
+        credentials: "same-origin",
+      });
+      const data = await res.json();
       if (res.status === 429) {
         renderConvertFailure(data);
-        setStatus(data.message || "Check quota exceeded.", "error");
+        setStatus(data.message, "error");
         return;
       }
-      if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(data.detail || data.message || "Check failed");
       renderCheckResult(data);
-      setStatus(data.summary || "Check complete.", data.recommendation === "retake" ? "error" : "ok");
-    } catch (err) {
-      console.error(err);
-      setStatus(err.message || "Check failed.", "error");
+      setStatus(data.summary || "Done", data.recommendation === "retake" ? "error" : "ok");
+    } catch (e) {
+      setStatus(e.message, "error");
     } finally {
       setBusy(false);
       setProgress(null);
@@ -356,44 +415,76 @@
     if (!selectedFile) return;
     setBusy(true);
     setProgress("check");
-    setStatus("Validating → removing background → framing → final QC…", "");
-    // Visual progress simulation while server works
+    setStatus("Converting…", "");
     const timers = [
-      setTimeout(() => setProgress("bg"), 400),
-      setTimeout(() => setProgress("frame"), 2000),
-      setTimeout(() => setProgress("qc"), 4000),
+      setTimeout(() => setProgress("bg"), 300),
+      setTimeout(() => setProgress("frame"), 1500),
+      setTimeout(() => setProgress("qc"), 3500),
     ];
     try {
-      const { res, data } = await postForm("/api/convert");
+      const form = formBase();
+      form.append("file", selectedFile);
+      const res = await fetch("/api/convert", {
+        method: "POST",
+        body: form,
+        credentials: "same-origin",
+      });
+      const data = await res.json();
       timers.forEach(clearTimeout);
-      if (res.status === 402 || res.status === 429) {
+      if (!res.ok || data.ok === false) {
         renderConvertFailure(data);
-        setStatus(data.message || "Payment or quota required.", "error");
+        setStatus(data.message || "Rejected", "error");
         return;
       }
-      if (res.status === 422 || data.ok === false) {
-        renderConvertFailure(data);
-        setStatus(data.message || "Conversion rejected.", "error");
-        return;
-      }
-      if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       renderConvertSuccess(data);
-      setStatus("Passed automated QC. Download files below.", "ok");
-    } catch (err) {
+      setStatus("QC passed. Fine-tune if needed, then download.", "ok");
+    } catch (e) {
       timers.forEach(clearTimeout);
-      console.error(err);
-      setStatus(err.message || "Conversion failed.", "error");
+      setStatus(e.message, "error");
     } finally {
       setBusy(false);
       setProgress(null);
     }
   });
 
+  reframeBtn.addEventListener("click", async () => {
+    if (!currentJobId) return;
+    setBusy(true);
+    setStatus("Applying fine-tune…", "");
+    try {
+      const form = new FormData();
+      form.append("scale_factor", scaleSlider.value);
+      form.append("offset_x_frac", oxSlider.value);
+      form.append("offset_y_frac", oySlider.value);
+      const res = await fetch(`/api/jobs/${currentJobId}/reframe`, {
+        method: "POST",
+        body: form,
+        credentials: "same-origin",
+      });
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        setStatus(data.message || "Reframe failed QC", "error");
+        if (data.validation) {
+          validationBox.innerHTML = "";
+          validationBox.appendChild(
+            renderIssueList("Fine-tune QC issues", data.validation, "bad")
+          );
+        }
+        return;
+      }
+      renderConvertSuccess(data);
+      setStatus("Fine-tune applied.", "ok");
+    } catch (e) {
+      setStatus(e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  });
+
   document.querySelectorAll(".buy-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      const pack = btn.getAttribute("data-pack");
       const form = new FormData();
-      form.append("pack_id", pack);
+      form.append("pack_id", btn.getAttribute("data-pack"));
       try {
         const res = await fetch("/api/billing/checkout", {
           method: "POST",
@@ -401,10 +492,10 @@
           credentials: "same-origin",
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || data.message || "Checkout failed");
-        if (data.checkout_url) window.location.href = data.checkout_url;
-      } catch (err) {
-        setStatus(err.message || "Checkout failed", "error");
+        if (!res.ok) throw new Error(data.detail || "Checkout failed");
+        if (data.checkout_url) location.href = data.checkout_url;
+      } catch (e) {
+        setStatus(e.message, "error");
       }
     });
   });
@@ -412,10 +503,4 @@
   docType.addEventListener("change", updateDocDescription);
   updateDocDescription();
   refreshStatus();
-
-  const params = new URLSearchParams(location.search);
-  if (params.get("billing") === "success") {
-    setStatus("Payment received — credits will appear shortly after webhook.", "ok");
-    refreshStatus();
-  }
 })();

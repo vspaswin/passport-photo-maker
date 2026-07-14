@@ -110,6 +110,11 @@ class JobStore:
         warnings: list,
         files: Dict[str, bytes],
         preview_jpeg: bytes,
+        prepared_png: Optional[bytes] = None,
+        original_thumb: Optional[bytes] = None,
+        guide_preview: Optional[bytes] = None,
+        face_dict: Optional[dict] = None,
+        child_mode: bool = False,
     ) -> str:
         with self._lock:
             self.cleanup_expired()
@@ -124,6 +129,20 @@ class JobStore:
                 (job_dir / safe).write_bytes(blob)
                 names.append(safe)
             (job_dir / "preview.jpg").write_bytes(preview_jpeg)
+            if prepared_png:
+                (job_dir / "prepared.png").write_bytes(prepared_png)
+            if original_thumb:
+                (job_dir / "original_thumb.jpg").write_bytes(original_thumb)
+            if guide_preview:
+                (job_dir / "guide_preview.jpg").write_bytes(guide_preview)
+            if face_dict is not None:
+                (job_dir / "face.json").write_text(
+                    json.dumps(face_dict), encoding="utf-8"
+                )
+            (job_dir / "meta_extra.json").write_text(
+                json.dumps({"child_mode": child_mode, "doc_type": doc_type}),
+                encoding="utf-8",
+            )
 
             with self._conn() as conn:
                 conn.execute(
@@ -145,6 +164,75 @@ class JobStore:
                     ),
                 )
             return job_id
+
+    def get_intermediate(
+        self, job_id: str, owner_key: str
+    ) -> Optional[dict]:
+        """Return prepared PNG + face dict for reframe, if owned."""
+        meta = self.get_meta(job_id, owner_key=owner_key)
+        if not meta:
+            return None
+        job_dir = self.jobs_dir / job_id
+        prep = job_dir / "prepared.png"
+        face_p = job_dir / "face.json"
+        if not prep.is_file() or not face_p.is_file():
+            return None
+        extra = {}
+        extra_p = job_dir / "meta_extra.json"
+        if extra_p.is_file():
+            extra = json.loads(extra_p.read_text(encoding="utf-8"))
+        return {
+            "prepared_png": prep.read_bytes(),
+            "face_dict": json.loads(face_p.read_text(encoding="utf-8")),
+            "doc_type": meta["doc_type"],
+            "child_mode": bool(extra.get("child_mode")),
+        }
+
+    def replace_job_files(
+        self,
+        job_id: str,
+        owner_key: str,
+        *,
+        files: Dict[str, bytes],
+        preview_jpeg: bytes,
+        guide_preview: Optional[bytes],
+        metrics: dict,
+        validation: dict,
+    ) -> bool:
+        """Overwrite export files for an owned job after reframe."""
+        meta = self.get_meta(job_id, owner_key=owner_key)
+        if not meta:
+            return False
+        job_dir = self.jobs_dir / job_id
+        # Remove old export names
+        for old in meta["files"]:
+            p = job_dir / old
+            if p.is_file():
+                p.unlink()
+        names = []
+        for name, blob in files.items():
+            safe = Path(name).name
+            (job_dir / safe).write_bytes(blob)
+            names.append(safe)
+        (job_dir / "preview.jpg").write_bytes(preview_jpeg)
+        if guide_preview:
+            (job_dir / "guide_preview.jpg").write_bytes(guide_preview)
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs SET metrics_json = ?, validation_json = ?, file_index_json = ?
+                    WHERE id = ? AND owner_key = ?
+                    """,
+                    (
+                        json.dumps(metrics),
+                        json.dumps(validation or {}),
+                        json.dumps(names),
+                        job_id,
+                        owner_key,
+                    ),
+                )
+        return True
 
     def get_meta(self, job_id: str, owner_key: Optional[str] = None) -> Optional[dict]:
         with self._lock:
@@ -178,8 +266,15 @@ class JobStore:
         if not meta:
             return None
         safe = Path(filename).name
-        if safe not in meta["files"] and safe != "preview.jpg":
+        allowed_extra = {
+            "preview.jpg",
+            "guide_preview.jpg",
+            "original_thumb.jpg",
+            "prepared.png",
+        }
+        if safe not in meta["files"] and safe not in allowed_extra:
             return None
+        # Never expose prepared.png via public download API name filter in main
         path = self.jobs_dir / job_id / safe
         if not path.is_file():
             return None

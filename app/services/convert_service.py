@@ -40,36 +40,51 @@ def run_convert(
     ip_key: str,
     image_bytes: bytes,
     doc_type: str = "indian-passport",
+    child_mode: bool = False,
+    scale_factor: float = 1.0,
+    offset_x_frac: float = 0.0,
+    offset_y_frac: float = 0.0,
+    charge: bool = True,
 ) -> Union[ConvertSuccess, ConvertFailure]:
     """
     Reserve quota → process → create owned job.
     Refunds reservation if processing fails after debit.
+    Set charge=False for reframe (already paid convert).
     """
     settings = get_settings()
     reservation: Optional[Reservation] = None
-    try:
-        reservation, usage = store.reserve_convert(
-            client_key,
-            ip_key,
-            free_daily=settings.free_daily_converts,
-            cost=settings.convert_credit_cost,
-            ip_free_daily=settings.ip_free_daily_converts,
-        )
-    except QuotaExceeded as exc:
-        return ConvertFailure(
-            error="payment_required",
-            message=exc.message,
-            validation=None,
-            usage=exc.usage,
-            http_status=402,
-        )
+    if charge:
+        try:
+            reservation, usage = store.reserve_convert(
+                client_key,
+                ip_key,
+                free_daily=settings.free_daily_converts,
+                cost=settings.convert_credit_cost,
+                ip_free_daily=settings.ip_free_daily_converts,
+            )
+        except QuotaExceeded as exc:
+            return ConvertFailure(
+                error="payment_required",
+                message=exc.message,
+                validation=None,
+                usage=exc.usage,
+                http_status=402,
+            )
 
     try:
         result = process_photo(
-            image_bytes, doc_type=doc_type, remove_bg=True, strict=True
+            image_bytes,
+            doc_type=doc_type,
+            remove_bg=True,
+            strict=True,
+            child_mode=child_mode,
+            scale_factor=scale_factor,
+            offset_x_frac=offset_x_frac,
+            offset_y_frac=offset_y_frac,
         )
     except PhotoValidationError as exc:
-        store.refund_reservation(reservation)
+        if reservation is not None:
+            store.refund_reservation(reservation)
         stage = exc.report.stage
         error = (
             "not_convertible"
@@ -89,7 +104,8 @@ def run_convert(
             http_status=422,
         )
     except Exception as exc:  # noqa: BLE001
-        store.refund_reservation(reservation)
+        if reservation is not None:
+            store.refund_reservation(reservation)
         return ConvertFailure(
             error="failed",
             message=f"Processing failed: {exc}",
@@ -106,6 +122,11 @@ def run_convert(
         warnings=result.warnings,
         files=result.files,
         preview_jpeg=result.preview_jpeg,
+        prepared_png=result.prepared_png,
+        original_thumb=result.original_thumb,
+        guide_preview=result.guide_preview_jpeg,
+        face_dict=result.face_dict,
+        child_mode=child_mode,
     )
     meta = store.get_meta(job_id, owner_key=client_key) or {}
     return ConvertSuccess(
