@@ -5,6 +5,7 @@
 **v0.1** focuses on **Indian Passport / Visa / OCI** photos (VFS Global / MEA / ICAO-style 2×2").
 
 - Fully **local** — photos stay on your machine  
+- **Strict automated QC** — rejects photos that would likely fail passport review (no face, blur, dark glasses, multi-person, bad lighting, etc.). **Downloads are only created after all checks pass.**  
 - **White background** removal (on-device)  
 - Face-aware crop with official **head height** and **eye line** targets  
 - Exports: single 2×2", 4×6 sheet, A4 sheet, portal JPEGs (≈10–100 KB)
@@ -98,9 +99,22 @@ python -m app.main
 # API docs: http://127.0.0.1:8765/docs
 ```
 
+## Strict validation
+
+Conversion is blocked (HTTP 422, no download files) when automated checks fail, including:
+
+- No face / multiple people  
+- Face too small, too close, or clipped  
+- Blurry or poorly lit face  
+- Eyes not clearly open / dark glasses / head tilt  
+- Not a colour photo / likely pure white clothing  
+- Final background not clean white / final geometry off  
+
+When validation passes, the ZIP includes `VALIDATION_PASSED.txt` with check details.
+
 ## Disclaimer
 
-This tool helps you prepare photos that **match published size and geometry guidance**. Acceptance is always up to the passport office / VFS / consulate. Check the latest requirements for your application channel before you submit.
+Automated QC greatly reduces reject risk but is **not a legal guarantee** of acceptance by VFS / MEA / consulate. Always follow the latest official photo rules for your channel.
 
 ## License
 

@@ -1,7 +1,6 @@
 (() => {
   const docType = document.getElementById("docType");
   const docDescription = document.getElementById("docDescription");
-  const removeBg = document.getElementById("removeBg");
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("fileInput");
   const fileName = document.getElementById("fileName");
@@ -13,12 +12,17 @@
   const metricsEl = document.getElementById("metrics");
   const warningsEl = document.getElementById("warnings");
   const fileList = document.getElementById("fileList");
+  const downloads = document.getElementById("downloads");
+  const validationBox = document.getElementById("validationBox");
+  const rejectBadge = document.getElementById("rejectBadge");
+  const passBadge = document.getElementById("passBadge");
 
   let selectedFile = null;
+  let modelReady = true;
 
   const DESCRIPTIONS = {
     "indian-passport":
-      "2×2 inch colour photo, white background, ICAO/VFS geometry for Passport / Visa / OCI.",
+      "2×2 inch colour photo, white background, ICAO/VFS geometry. Strict automated QC required before any download.",
   };
 
   function setStatus(msg, kind) {
@@ -39,7 +43,7 @@
     selectedFile = file;
     fileName.textContent = file.name + " · " + Math.round(file.size / 1024) + " KB";
     convertBtn.disabled = false;
-    setStatus("Ready to convert.");
+    setStatus("Ready — will validate, then convert only if checks pass.");
   }
 
   dropzone.addEventListener("click", () => fileInput.click());
@@ -77,31 +81,74 @@
     return span;
   }
 
-  function renderResult(data) {
+  function showResultShell() {
     emptyState.classList.add("hidden");
     result.classList.remove("hidden");
+  }
+
+  function renderValidation(validation, passed) {
+    validationBox.innerHTML = "";
+    if (!validation) return;
+
+    const title = document.createElement("h3");
+    title.textContent = passed
+      ? "Automated checks — all passed"
+      : "Photo rejected — fix these issues";
+    title.className = passed ? "val-title ok" : "val-title bad";
+    validationBox.appendChild(title);
+
+    const issues = validation.issues || [];
+    if (!passed && issues.length) {
+      const list = document.createElement("ul");
+      list.className = "issue-list";
+      issues.forEach((issue) => {
+        const li = document.createElement("li");
+        li.innerHTML =
+          `<strong>${escapeHtml(issue.message)}</strong>` +
+          `<div class="fix">${escapeHtml(issue.how_to_fix || "")}</div>` +
+          `<div class="code">${escapeHtml(issue.code || "")}</div>`;
+        list.appendChild(li);
+      });
+      validationBox.appendChild(list);
+    } else if (passed) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent =
+        "Source and final photo passed face, eyes, sharpness, lighting, clothing, background, and geometry checks.";
+      validationBox.appendChild(p);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderSuccess(data) {
+    showResultShell();
+    preview.classList.remove("hidden");
     preview.src = data.preview_data_url;
+    passBadge.classList.remove("hidden");
+    rejectBadge.classList.add("hidden");
+    downloads.classList.remove("hidden");
 
     metricsEl.innerHTML = "";
     const m = data.metrics || {};
+    metricsEl.appendChild(pill("QC passed", true));
     metricsEl.appendChild(
-      pill(
-        `Head height: ${m.head_height_in}"`,
-        m.head_height_ok === 1
-      )
+      pill(`Head height: ${m.head_height_in}"`, m.head_height_ok === 1)
     );
     metricsEl.appendChild(
-      pill(
-        `Eyes from bottom: ${m.eye_from_bottom_in}"`,
-        m.eye_position_ok === 1
-      )
+      pill(`Eyes from bottom: ${m.eye_from_bottom_in}"`, m.eye_position_ok === 1)
     );
     if (m.upload_600_kb != null) {
       metricsEl.appendChild(pill(`Upload 600: ${m.upload_600_kb} KB`, true));
     }
-    if (m.upload_350_kb != null) {
-      metricsEl.appendChild(pill(`Upload 350: ${m.upload_350_kb} KB`, true));
-    }
+
+    renderValidation(data.validation, true);
 
     warningsEl.innerHTML = "";
     if (data.warnings && data.warnings.length) {
@@ -124,7 +171,19 @@
     });
   }
 
-  let modelReady = true;
+  function renderFailure(data) {
+    showResultShell();
+    preview.classList.add("hidden");
+    preview.removeAttribute("src");
+    passBadge.classList.add("hidden");
+    rejectBadge.classList.remove("hidden");
+    downloads.classList.add("hidden");
+    fileList.innerHTML = "";
+    metricsEl.innerHTML = "";
+    metricsEl.appendChild(pill("QC failed — no downloads", false));
+    warningsEl.innerHTML = "";
+    renderValidation(data.validation, false);
+  }
 
   async function refreshModelStatus() {
     try {
@@ -132,7 +191,7 @@
       const data = await res.json();
       modelReady = !!data.model_ready;
     } catch (_) {
-      modelReady = true; // don't scare the user if status fails
+      modelReady = true;
     }
   }
 
@@ -140,29 +199,55 @@
     if (!selectedFile) return;
     convertBtn.disabled = true;
     await refreshModelStatus();
-    if (removeBg.checked && !modelReady) {
+    if (!modelReady) {
       setStatus(
-        "Converting… downloading background-removal model (one-time, ~170 MB)…",
+        "Validating… may download background model once (~170 MB)…",
         ""
       );
     } else {
-      setStatus("Converting…", "");
+      setStatus("Validating photo, then converting if it passes…", "");
     }
 
     const form = new FormData();
     form.append("file", selectedFile);
     form.append("doc_type", docType.value);
-    form.append("remove_bg", removeBg.checked ? "true" : "false");
+    form.append("remove_bg", "true");
+    form.append("strict", "true");
 
     try {
       const res = await fetch("/api/convert", { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+
+      if (res.status === 422 || data.error === "validation_failed") {
+        renderFailure(data);
+        const n = (data.validation && data.validation.issues
+          ? data.validation.issues.length
+          : 0);
+        setStatus(
+          data.message ||
+            `Photo rejected (${n} issue${n === 1 ? "" : "s"}). Fix and retake.`,
+          "error"
+        );
+        return;
       }
-      renderResult(data);
+
+      if (!res.ok) {
+        const detail = data.detail;
+        const msg =
+          typeof detail === "string"
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((d) => d.msg || d).join("; ")
+              : data.message || `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+
+      renderSuccess(data);
       modelReady = true;
-      setStatus("Done. Download print and digital files below.", "ok");
+      setStatus(
+        "Passed automated QC. Safe to download print + digital files.",
+        "ok"
+      );
     } catch (err) {
       console.error(err);
       setStatus(err.message || "Conversion failed.", "error");

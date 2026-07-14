@@ -207,6 +207,14 @@ select {
   align-items: start;
 }
 
+.result-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.result-right { min-width: 0; }
+
 @media (max-width: 640px) {
   .result { grid-template-columns: 1fr; }
 }
@@ -219,6 +227,72 @@ select {
   background: white;
   aspect-ratio: 1;
   object-fit: cover;
+}
+
+.pass-badge,
+.reject-badge {
+  display: inline-block;
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.pass-badge {
+  background: color-mix(in srgb, var(--ok) 18%, var(--surface-2));
+  color: #86efac;
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+
+.reject-badge {
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface-2));
+  color: #fca5a5;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.validation-box {
+  margin: 0.5rem 0 0.75rem;
+}
+
+.val-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.val-title.ok { color: #86efac; }
+.val-title.bad { color: #fca5a5; }
+
+.issue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.issue-list li {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: 10px;
+  padding: 0.65rem 0.8rem;
+}
+
+.issue-list .fix {
+  color: var(--text);
+  margin-top: 0.25rem;
+  font-size: 0.92rem;
+}
+
+.issue-list .code {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+  font-family: ui-monospace, monospace;
+}
+
+.strict-note {
+  color: #93c5fd;
 }
 
 .metrics {

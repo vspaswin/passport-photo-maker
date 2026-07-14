@@ -11,7 +11,7 @@
     <header class="header">
       <div>
         <h1>Passport Photo Maker</h1>
-        <p class="tagline">Local · Private · Print + digital ready</p>
+        <p class="tagline">Local · Private · Strict validation · Print + digital</p>
       </div>
       <span class="badge">v{{ version }}</span>
     </header>
@@ -28,10 +28,10 @@
           </select>
         </label>
         <p id="docDescription" class="hint"></p>
-        <label class="check">
-          <input type="checkbox" id="removeBg" checked />
-          Replace background with plain white
-        </label>
+        <p class="hint strict-note">
+          Strict QC is always on: if the photo could be rejected, conversion is
+          blocked and no download files are created.
+        </p>
       </section>
 
       <section class="card">
@@ -39,37 +39,50 @@
         <div id="dropzone" class="dropzone" tabindex="0">
           <input type="file" id="fileInput" accept="image/*" hidden />
           <p><strong>Drop a photo here</strong> or click to browse</p>
-          <p class="hint">JPEG / PNG · face the camera · good lighting</p>
+          <p class="hint">Front face · eyes open · good light · colour photo</p>
           <p id="fileName" class="file-name"></p>
         </div>
-        <button id="convertBtn" class="btn primary" disabled>Convert photo</button>
+        <button id="convertBtn" class="btn primary" disabled>Validate &amp; convert</button>
         <p id="status" class="status" aria-live="polite"></p>
       </section>
 
       <section class="card result-card">
         <h2>3. Result</h2>
-        <div id="emptyState" class="empty">Preview and downloads appear here.</div>
+        <div id="emptyState" class="empty">
+          Upload a photo. Downloads appear only after all automated checks pass.
+        </div>
         <div id="result" class="result hidden">
-          <img id="preview" alt="Passport photo preview" />
-          <div class="metrics" id="metrics"></div>
-          <div id="warnings" class="warnings"></div>
-          <div class="downloads">
-            <h3>Downloads</h3>
-            <ul id="fileList"></ul>
+          <div class="result-left">
+            <img id="preview" alt="Passport photo preview" class="hidden" />
+            <div id="rejectBadge" class="reject-badge hidden">Not submittable</div>
+            <div id="passBadge" class="pass-badge hidden">Passed automated QC</div>
+          </div>
+          <div class="result-right">
+            <div class="metrics" id="metrics"></div>
+            <div id="validationBox" class="validation-box"></div>
+            <div id="warnings" class="warnings"></div>
+            <div id="downloads" class="downloads hidden">
+              <h3>Downloads</h3>
+              <ul id="fileList"></ul>
+            </div>
           </div>
         </div>
       </section>
     </main>
 
     <section class="card tips">
-      <h2>Indian passport tips (VFS / MEA)</h2>
+      <h2>What we check (before you can download)</h2>
       <ul>
-        <li><strong>2×2 inch</strong> colour photo, plain <strong>white</strong> background</li>
-        <li>Head height about <strong>1–1⅜ inch</strong>; eyes open, facing camera</li>
-        <li>Coloured clothes (not pure white); natural expression</li>
-        <li>Use <code>*_upload_600.jpg</code> for the website; print the 4×6 or A4 sheet for physical copies</li>
-        <li>Photos never leave your computer — processing is fully local</li>
+        <li>Exactly one clear face · frontal · both eyes open and level</li>
+        <li>Sharp (not blurry) · proper brightness · natural colour</li>
+        <li>Face size in frame · not clipped · not extreme close-up</li>
+        <li>No dark glasses · not pure white clothing</li>
+        <li>Clean plain white background on the final photo</li>
+        <li>Head height / geometry for 2×2 Indian passport (VFS / MEA style)</li>
       </ul>
+      <p class="hint">
+        For home print on A4: after a pass, use <code>*_sheet_a4.jpg</code> at 100% scale.
+      </p>
     </section>
 
     <footer class="footer">

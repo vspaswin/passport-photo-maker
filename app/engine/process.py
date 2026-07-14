@@ -14,6 +14,14 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 from .specs import PhotoSpec, get_spec
+from .validate import (
+    PhotoValidationError,
+    ValidationIssue,
+    ValidationReport,
+    merge_reports,
+    validate_output_photo,
+    validate_source_photo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,7 @@ class ProcessResult:
     files: Dict[str, bytes]  # filename -> bytes
     metrics: Dict[str, float]
     warnings: List[str]
+    validation: Optional[Dict] = None  # full validation report dict
 
 
 def _get_rembg_session():
@@ -432,22 +441,65 @@ def process_photo(
     image_bytes: bytes,
     doc_type: str = "indian-passport",
     remove_bg: bool = True,
+    strict: bool = True,
 ) -> ProcessResult:
     """
     Convert an arbitrary photo into document-ready print + digital files.
 
     All processing is local (no network).
+
+    When ``strict`` is True (default), the photo must pass source + output
+    validation or ``PhotoValidationError`` is raised and no files are produced.
     """
     spec = get_spec(doc_type)
     warnings: List[str] = []
 
     original = load_image(image_bytes)
 
+    # --- Stage 1: source validation (before expensive bg removal) ---
+    # Background replacement is required for Indian passport digital cleanliness
+    if strict and not remove_bg:
+        raise PhotoValidationError(
+            ValidationReport(
+                passed=False,
+                stage="source",
+                issues=[
+                    ValidationIssue(
+                        code="bg_removal_required",
+                        message="White background replacement is required for a submittable passport photo.",
+                        how_to_fix='Keep "Replace background with plain white" enabled.',
+                    )
+                ],
+                checks={},
+            )
+        )
+
+    source_report = validate_source_photo(
+        original, spec, require_bg_removal=remove_bg
+    )
+    if strict and not source_report.passed:
+        raise PhotoValidationError(source_report)
+
     if remove_bg:
         try:
             prepared = remove_background_to_white(original, spec.background_rgb)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Background removal failed")
+            if strict:
+                raise PhotoValidationError(
+                    ValidationReport(
+                        passed=False,
+                        stage="source",
+                        issues=[
+                            ValidationIssue(
+                                code="bg_removal_failed",
+                                message=f"Background removal failed: {exc}",
+                                how_to_fix="Retry, or retake against a plain light wall with even lighting.",
+                            )
+                        ],
+                        checks={},
+                    )
+                ) from exc
             warnings.append(
                 f"Background removal failed ({exc}); used original image."
             )
@@ -457,13 +509,35 @@ def process_photo(
 
     face = detect_face(prepared)
     if face is None:
+        # Re-validate on prepared image; if still no face, hard fail in strict mode
+        if strict:
+            raise PhotoValidationError(
+                ValidationReport(
+                    passed=False,
+                    stage="source",
+                    issues=[
+                        ValidationIssue(
+                            code="no_face_after_bg",
+                            message="Face could not be located after background processing.",
+                            how_to_fix="Retake a clear front-facing photo with good lighting.",
+                        )
+                    ],
+                    checks=source_report.checks,
+                )
+            )
         warnings.append(
-            "Could not detect a face reliably; used a center estimate. "
-            "Check the preview and re-take if needed."
+            "Could not detect a face reliably; used a center estimate."
         )
         face = _fallback_face(prepared)
 
     framed, metrics = frame_to_spec(prepared, face, spec)
+
+    # --- Stage 2: output validation ---
+    output_report = validate_output_photo(framed, spec)
+    full_report = merge_reports(source_report, output_report)
+
+    if strict and not output_report.passed:
+        raise PhotoValidationError(full_report)
 
     # Validate measured placement is within allowed bands (by construction targets are)
     head_ok = (
@@ -478,6 +552,7 @@ def process_photo(
     )
     metrics["head_height_ok"] = 1.0 if head_ok else 0.0
     metrics["eye_position_ok"] = 1.0 if eye_ok else 0.0
+    metrics["validation_passed"] = 1.0
 
     files: Dict[str, bytes] = {}
     base = f"{spec.id}"
@@ -523,8 +598,9 @@ def process_photo(
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, data in files.items():
             zf.writestr(name, data)
-        readme = _result_readme(spec, metrics, warnings)
+        readme = _result_readme(spec, metrics, warnings, full_report)
         zf.writestr("README.txt", readme)
+        zf.writestr("VALIDATION_PASSED.txt", _validation_certificate(full_report, spec))
     files[f"{base}_all.zip"] = zip_buf.getvalue()
 
     return ProcessResult(
@@ -533,17 +609,27 @@ def process_photo(
         files=files,
         metrics=metrics,
         warnings=warnings,
+        validation=full_report.to_dict(),
     )
 
 
 def _result_readme(
-    spec: PhotoSpec, metrics: Dict[str, float], warnings: List[str]
+    spec: PhotoSpec,
+    metrics: Dict[str, float],
+    warnings: List[str],
+    validation: Optional[ValidationReport] = None,
 ) -> str:
     lines = [
         f"Passport Photo Maker — {spec.title}",
         "=" * 50,
         "",
         spec.description,
+        "",
+        "VALIDATION: PASSED (automated QC)",
+        "  This package was only generated because the source and final photo",
+        "  passed strict automated checks (face, eyes, sharpness, lighting,",
+        "  background, geometry). Government acceptance is still their decision,",
+        "  but known reject risks were blocked before export.",
         "",
         "Geometry targets (VFS / ICAO style):",
         f"  Head height: {metrics.get('head_height_in')} in "
@@ -561,8 +647,8 @@ def _result_readme(
         "",
         "Tips:",
         "  - Print on thin photo paper; prefer matte over glossy.",
-        "  - Confirm the face is a true likeness before submitting.",
         "  - Portal upload: try 600 first; use 350 if rejected.",
+        "  - For home A4: use *_sheet_a4.jpg at 100% scale.",
         "",
     ]
     if warnings:
@@ -572,4 +658,28 @@ def _result_readme(
         lines.append("")
     for note in spec.notes:
         lines.append(f"Note: {note}")
+    return "\n".join(lines) + "\n"
+
+
+def _validation_certificate(report: ValidationReport, spec: PhotoSpec) -> str:
+    lines = [
+        "AUTOMATED VALIDATION CERTIFICATE",
+        "================================",
+        f"Document type: {spec.title}",
+        f"Result: {'PASSED' if report.passed else 'FAILED'}",
+        f"Issues: {len(report.issues)}",
+        "",
+        "Checks (summary):",
+    ]
+    for stage, data in (report.checks or {}).items():
+        lines.append(f"  [{stage}]")
+        if isinstance(data, dict):
+            for k, v in data.items():
+                lines.append(f"    {k}: {v}")
+        else:
+            lines.append(f"    {data}")
+    lines.append("")
+    lines.append(
+        "This is automated QC, not an official government endorsement."
+    )
     return "\n".join(lines) + "\n"
