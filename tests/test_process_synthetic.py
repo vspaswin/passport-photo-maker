@@ -27,11 +27,11 @@ def _synthetic_portrait() -> bytes:
 
 
 def test_frame_to_spec_with_fallback():
-    from app.engine.process import _fallback_face
+    from app.engine.face import fallback_face
 
     data = _synthetic_portrait()
     im = load_image(data)
-    face = detect_face(im) or _fallback_face(im)
+    face = detect_face(im) or fallback_face(im)
     spec = get_spec("indian-passport")
     framed, metrics = frame_to_spec(im, face, spec, out_px=600)
     assert framed.size == (600, 600)

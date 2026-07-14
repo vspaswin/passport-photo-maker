@@ -6,13 +6,13 @@ import io
 import logging
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
+from .face import FaceBox, detect_primary_face, fallback_face
 from .specs import PhotoSpec, get_spec
 from .validate import (
     PhotoValidationError,
@@ -27,21 +27,6 @@ logger = logging.getLogger(__name__)
 
 # Lazy rembg session (loads ONNX model once)
 _rembg_session = None
-
-
-@dataclass
-class FaceBox:
-    """Face region in pixel coordinates (source image)."""
-
-    x: int
-    y: int
-    w: int
-    h: int
-    # Estimated landmarks
-    top_of_head: int
-    chin: int
-    eye_y: int
-    center_x: int
 
 
 @dataclass
@@ -197,72 +182,7 @@ def _scrub_grey_halo(
 
 def detect_face(im: Image.Image) -> Optional[FaceBox]:
     """Detect primary face and estimate head/eye landmarks."""
-    rgb = np.array(im.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    gray = cv2.equalizeHist(gray)
-
-    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(str(cascade_path))
-
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.08,
-        minNeighbors=5,
-        minSize=(80, 80),
-        flags=cv2.CASCADE_SCALE_IMAGE,
-    )
-
-    if len(faces) == 0:
-        # Retry more leniently
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.05, minNeighbors=3, minSize=(40, 40)
-        )
-
-    if len(faces) == 0:
-        return None
-
-    # Largest face
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-
-    # Haar box is roughly forehead→chin; extend upward for hair
-    top_of_head = max(0, int(y - 0.45 * h))
-    chin = min(im.height - 1, int(y + h * 1.05))
-    # Eyes ~ 40% down from top of Haar face box
-    eye_y = int(y + 0.38 * h)
-    center_x = int(x + w / 2)
-
-    return FaceBox(
-        x=int(x),
-        y=int(y),
-        w=int(w),
-        h=int(h),
-        top_of_head=top_of_head,
-        chin=chin,
-        eye_y=eye_y,
-        center_x=center_x,
-    )
-
-
-def _fallback_face(im: Image.Image) -> FaceBox:
-    """Center-biased estimate when detector fails."""
-    w, h = im.size
-    # Assume subject is upper-center portrait
-    box_h = int(h * 0.45)
-    box_w = int(box_h * 0.75)
-    cx = w // 2
-    top = int(h * 0.08)
-    chin = top + box_h
-    eye_y = top + int(box_h * 0.42)
-    return FaceBox(
-        x=cx - box_w // 2,
-        y=top + int(0.35 * box_h),
-        w=box_w,
-        h=int(box_h * 0.7),
-        top_of_head=top,
-        chin=chin,
-        eye_y=eye_y,
-        center_x=cx,
-    )
+    return detect_primary_face(im)
 
 
 def frame_to_spec(
@@ -527,7 +447,7 @@ def process_photo(
         warnings.append(
             "Could not detect a face reliably; used a center estimate."
         )
-        face = _fallback_face(prepared)
+        face = fallback_face(prepared)
 
     framed, metrics = frame_to_spec(prepared, face, spec)
 
