@@ -68,18 +68,111 @@ def remove_background_to_white(
     im: Image.Image,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
 ) -> Image.Image:
-    """Remove background and composite onto solid colour."""
+    """Remove background and composite onto solid colour with clean edges.
+
+    rembg's soft alpha often leaves a grey halo on white. We harden the mask,
+    strip colour fringing, and force pure white outside the subject.
+    """
     from rembg import remove
 
     session = _get_rembg_session()
     buf = io.BytesIO()
     im.save(buf, format="PNG")
-    cut = remove(buf.getvalue(), session=session)
-    rgba = Image.open(io.BytesIO(cut)).convert("RGBA")
 
-    canvas = Image.new("RGB", rgba.size, bg_rgb)
-    canvas.paste(rgba, mask=rgba.split()[3])
-    return canvas
+    # Prefer alpha matting when available for sharper subject edges.
+    try:
+        cut = remove(
+            buf.getvalue(),
+            session=session,
+            alpha_matting=True,
+            alpha_matting_foreground_threshold=240,
+            alpha_matting_background_threshold=10,
+            alpha_matting_erode_size=10,
+        )
+    except Exception:  # noqa: BLE001
+        logger.info("Alpha matting unavailable; using standard rembg cutout")
+        cut = remove(buf.getvalue(), session=session)
+
+    rgba = Image.open(io.BytesIO(cut)).convert("RGBA")
+    return _composite_clean_white(rgba, bg_rgb)
+
+
+def _composite_clean_white(
+    rgba: Image.Image,
+    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
+) -> Image.Image:
+    """Composite RGBA cutout onto pure white without grey edge shades."""
+    arr = np.array(rgba).astype(np.float32)
+    rgb = arr[:, :, :3]
+    alpha = arr[:, :, 3] / 255.0
+
+    # 1) Harden soft alpha so semi-transparent grey fringes disappear.
+    #    Pixels below cut → background; above keep → subject; in between ramp.
+    cut = 0.42
+    keep = 0.88
+    a = np.clip((alpha - cut) / max(keep - cut, 1e-6), 0.0, 1.0)
+
+    # 2) Morphological cleanup: drop isolated speckles, close tiny holes in mask.
+    a_u8 = (a * 255).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_OPEN, kernel, iterations=1)
+    a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Slight erode removes leftover outer halo, then tiny blur for non-jagged edge
+    a_u8 = cv2.erode(a_u8, kernel, iterations=1)
+    a = a_u8.astype(np.float32) / 255.0
+    a = cv2.GaussianBlur(a, (3, 3), 0)
+    a = np.clip(a, 0.0, 1.0)
+
+    # 3) Colour decontamination on edge pixels (remove dark/bg bleed in RGB).
+    #    Estimate pure foreground: fg = (observed - (1-a)*bg) / a
+    bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
+    eps = 1e-4
+    a3 = a[:, :, None]
+    fg = (rgb - (1.0 - a3) * bg) / np.maximum(a3, eps)
+    fg = np.clip(fg, 0, 255)
+
+    # For solid subject pixels keep original RGB (less posterization);
+    # for edge band use decontaminated colour.
+    edge = (a > 0.02) & (a < 0.98)
+    rgb_out = rgb.copy()
+    rgb_out[edge] = fg[edge]
+
+    # 4) Composite onto pure white
+    out = rgb_out * a3 + bg * (1.0 - a3)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    # 5) Force pure white where mask is effectively background
+    bg_mask = a < 0.08
+    out[bg_mask] = bg_rgb
+
+    # 6) Kill remaining pale grey halos (low chroma, high luminance near edges)
+    out = _scrub_grey_halo(out, a, bg_rgb)
+    return Image.fromarray(out, mode="RGB")
+
+
+def _scrub_grey_halo(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    bg_rgb: Tuple[int, int, int],
+) -> np.ndarray:
+    """Replace residual grey fringe pixels with pure background."""
+    out = rgb.copy()
+    # Near-white / grey (low saturation, fairly bright)
+    mn = out.min(axis=2)
+    mx = out.max(axis=2)
+    chroma = mx - mn
+    lum = out.mean(axis=2)
+
+    # Outside / edge of subject
+    fringe = alpha < 0.97
+    pale_grey = (lum >= 200) & (chroma <= 28) & fringe
+    mid_grey = (lum >= 160) & (lum < 200) & (chroma <= 18) & (alpha < 0.55)
+    out[pale_grey | mid_grey] = bg_rgb
+
+    # Any leftover near-white anywhere (safe for white bg passport)
+    near_white = (mn >= 235) & (chroma <= 16)
+    out[near_white] = bg_rgb
+    return out
 
 
 def detect_face(im: Image.Image) -> Optional[FaceBox]:
@@ -218,17 +311,19 @@ def frame_to_spec(
 def _clean_near_white(
     im: Image.Image,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
-    threshold: int = 232,
+    threshold: int = 225,
 ) -> Image.Image:
-    """Push near-white pale pixels toward pure background (edges/halos)."""
+    """Final pass: push pale grey / near-white pixels to pure background."""
     arr = np.array(im.convert("RGB"))
     mn = arr.min(axis=2)
     mx = arr.max(axis=2)
-    near = (mn >= threshold) & ((mx - mn) <= 18)
-    # Avoid nuking light clothing that is not near-gray: require low chroma
-    arr[near] = bg_rgb
-    # Pure near-255
-    pure = (arr[:, :, 0] >= 240) & (arr[:, :, 1] >= 240) & (arr[:, :, 2] >= 240)
+    chroma = mx - mn
+    lum = arr.mean(axis=2)
+
+    near = (mn >= threshold) & (chroma <= 22)
+    pale = (lum >= 210) & (chroma <= 18)
+    arr[near | pale] = bg_rgb
+    pure = (arr[:, :, 0] >= 238) & (arr[:, :, 1] >= 238) & (arr[:, :, 2] >= 238)
     arr[pure] = bg_rgb
     return Image.fromarray(arr)
 
