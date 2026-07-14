@@ -108,20 +108,23 @@ def _composite_clean_white(
 
     # 1) Harden soft alpha so semi-transparent grey fringes disappear.
     #    Pixels below cut → background; above keep → subject; in between ramp.
-    cut = 0.42
-    keep = 0.88
+    cut = 0.50
+    keep = 0.92
     a = np.clip((alpha - cut) / max(keep - cut, 1e-6), 0.0, 1.0)
 
     # 2) Morphological cleanup: drop isolated speckles, close tiny holes in mask.
     a_u8 = (a * 255).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_OPEN, kernel, iterations=1)
     a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
-    # Slight erode removes leftover outer halo, then tiny blur for non-jagged edge
+    # Erode removes leftover outer halo (main source of grey shade)
     a_u8 = cv2.erode(a_u8, kernel, iterations=1)
     a = a_u8.astype(np.float32) / 255.0
-    a = cv2.GaussianBlur(a, (3, 3), 0)
+    # Very light blur only — avoid reintroducing a wide soft grey edge
+    a = cv2.GaussianBlur(a, (3, 3), 0.6)
     a = np.clip(a, 0.0, 1.0)
+    # Re-binarize mid-tones toward 0/1 after blur
+    a = np.where(a < 0.35, 0.0, np.where(a > 0.85, 1.0, a))
 
     # 3) Colour decontamination on edge pixels (remove dark/bg bleed in RGB).
     #    Estimate pure foreground: fg = (observed - (1-a)*bg) / a
@@ -142,7 +145,7 @@ def _composite_clean_white(
     out = np.clip(out, 0, 255).astype(np.uint8)
 
     # 5) Force pure white where mask is effectively background
-    bg_mask = a < 0.08
+    bg_mask = a < 0.12
     out[bg_mask] = bg_rgb
 
     # 6) Kill remaining pale grey halos (low chroma, high luminance near edges)
@@ -157,20 +160,28 @@ def _scrub_grey_halo(
 ) -> np.ndarray:
     """Replace residual grey fringe pixels with pure background."""
     out = rgb.copy()
-    # Near-white / grey (low saturation, fairly bright)
     mn = out.min(axis=2)
     mx = out.max(axis=2)
     chroma = mx - mn
     lum = out.mean(axis=2)
 
-    # Outside / edge of subject
-    fringe = alpha < 0.97
-    pale_grey = (lum >= 200) & (chroma <= 28) & fringe
-    mid_grey = (lum >= 160) & (lum < 200) & (chroma <= 18) & (alpha < 0.55)
+    # Dilate subject mask slightly; anything outside that looks grey → white
+    a_u8 = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    subject = cv2.dilate(a_u8, kernel, iterations=1) > 20
+    outside = ~subject
+
+    # Strong scrub outside dilated subject
+    out[outside] = bg_rgb
+
+    # Soft fringe band: pale/mid greys near edge → white
+    fringe = (alpha < 0.98) & (alpha > 0.05)
+    pale_grey = (lum >= 185) & (chroma <= 32) & fringe
+    mid_grey = (lum >= 150) & (lum < 185) & (chroma <= 22) & (alpha < 0.65)
     out[pale_grey | mid_grey] = bg_rgb
 
-    # Any leftover near-white anywhere (safe for white bg passport)
-    near_white = (mn >= 235) & (chroma <= 16)
+    # Near-white anywhere (passport white bg)
+    near_white = (mn >= 230) & (chroma <= 18)
     out[near_white] = bg_rgb
     return out
 
