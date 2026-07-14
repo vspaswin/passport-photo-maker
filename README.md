@@ -48,8 +48,16 @@ Defaults (env-overridable):
 
 | | Free / day | After free |
 |--|------------|------------|
-| Checks | 20 | Unlimited with credits |
-| Converts | 3 | 1 credit each |
+| Checks (per cookie) | 20 | Unlimited with credits |
+| Converts (per cookie) | 3 | 1 credit each |
+| IP caps (cookie rotation) | 40 checks / 6 converts | Buy credits |
+
+Hardening (v1.0.1+):
+
+- **Atomic** `reserve_convert` before work; **refund** if processing fails
+- **Idempotent** Stripe fulfill (no double-credit)
+- **Job ownership** — downloads require matching client cookie
+- Production **fails to start** if `SECRET_KEY` is still the default
 
 1. Create products/prices in [Stripe Dashboard](https://dashboard.stripe.com/)
 2. Copy `.env.example` → `.env` and set:
