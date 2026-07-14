@@ -9,6 +9,11 @@ def test_indian_passport_registered():
     assert spec.eye_from_bottom_min < spec.eye_from_bottom_target < spec.eye_from_bottom_max
     assert len(spec.upload_variants) >= 1
     assert len(spec.print_sheets) >= 1
+    suffixes = {s.filename_suffix for s in spec.print_sheets}
+    assert "sheet_letter" in suffixes
+    letter = next(s for s in spec.print_sheets if s.filename_suffix == "sheet_letter")
+    assert letter.page_inches == (8.5, 11.0)
+    assert letter.cols * letter.rows == 12
 
 
 def test_list_document_types():

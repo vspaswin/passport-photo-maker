@@ -45,3 +45,17 @@ def test_print_sheet_size():
         photo, page_inches=(4.0, 6.0), cols=2, rows=3, photo_inches=(2.0, 2.0), dpi=100
     )
     assert sheet.size == (400, 600)
+
+
+def test_letter_print_sheet_size():
+    """US Letter 8.5×11 at 100 dpi → 850×1100 px; 3×4 grid of 2×2 photos."""
+    photo = Image.new("RGB", (400, 400), (200, 100, 80))
+    sheet = make_print_sheet(
+        photo,
+        page_inches=(8.5, 11.0),
+        cols=3,
+        rows=4,
+        photo_inches=(2.0, 2.0),
+        dpi=100,
+    )
+    assert sheet.size == (850, 1100)

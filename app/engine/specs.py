@@ -110,6 +110,18 @@ INDIAN_PASSPORT = PhotoSpec(
             description="Six 2×2 photos on standard 4×6 photo paper.",
         ),
         PrintSheet(
+            name="Letter print sheet (8.5×11)",
+            filename_suffix="sheet_letter",
+            page_inches=(8.5, 11.0),
+            cols=3,
+            rows=4,
+            description=(
+                "Twelve true 2×2 photos on US Letter (8.5×11). "
+                "Use for Canon GP-701 / glossy Letter photo paper: print at 100% scale, "
+                "Paper=Letter, Type=Photo Glossy, Quality=High/Best."
+            ),
+        ),
+        PrintSheet(
             name="A4 print sheet",
             filename_suffix="sheet_a4",
             page_inches=(8.27, 11.69),
@@ -119,7 +131,8 @@ INDIAN_PASSPORT = PhotoSpec(
         ),
     ),
     notes=(
-        "Print on thin photo paper; continuous-tone quality.",
+        "Print on photo paper when possible (e.g. Canon GP-701 glossy Letter); continuous-tone quality.",
+        "Letter glossy: use *_sheet_letter.jpg at 100% / Actual size — not Fit to Page.",
         "Do not heavily beautify or distort the face (true likeness required).",
         "Wear coloured clothing (not pure white); avoid busy patterns.",
         "Children under 10: face/eye geometry may be slightly relaxed.",

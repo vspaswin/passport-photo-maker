@@ -8,7 +8,7 @@
 - **Strict automated QC** — rejects photos that would likely fail passport review (no face, blur, dark glasses, multi-person, bad lighting, etc.). **Downloads are only created after all checks pass.**  
 - **White background** removal (on-device)  
 - Face-aware crop with official **head height** and **eye line** targets  
-- Exports: single 2×2", 4×6 sheet, A4 sheet, portal JPEGs (≈10–100 KB)
+- Exports: single 2×2", 4×6 sheet, **Letter 8.5×11 sheet** (GP-701), A4 sheet, portal JPEGs (≈10–100 KB)
 
 ## Quick start
 
@@ -34,6 +34,7 @@ First conversion may download a small ONNX model for background removal (`rembg`
 | `*_upload_350.jpg` | Smaller fallback if the portal rejects size |
 | `*_PRINT_2x2_inch.jpg` | Single 2×2" print @ 600 dpi |
 | `*_sheet_4x6.jpg` | 6 copies on 4×6 photo paper |
+| `*_sheet_letter.jpg` | **12 true 2×2"** on **US Letter 8.5×11** (Canon GP-701 / glossy Letter) |
 | `*_sheet_a4.jpg` | 12 copies on A4 (print at **100%** scale) |
 | `*_master.jpg` | High-res square archive |
 | `*_all.zip` | Everything above + README |
@@ -110,6 +111,22 @@ python -m app.main
 **As-is** / **final output** require clean white background, geometry, eyes, etc.
 
 When conversion passes, the ZIP includes `VALIDATION_PASSED.txt` with check details.
+
+## Printing on Canon GP-701 (Letter glossy)
+
+Use **`indian-passport_sheet_letter.jpg`** (not A4).
+
+| Setting | Value |
+|---------|--------|
+| Paper size | **Letter** (8.5×11) |
+| Paper type | **Photo Glossy** (or HP “Photographic Glossy”) |
+| Quality | **High / Best** (not Draft) |
+| Scale | **100% / Actual size** (turn off Fit to Page) |
+| Borderless | Optional; for cutouts, normal margins + true 2×2 size matter more |
+
+- Load **glossy side** the way your tray icon shows (often face-down on HP ENVY).
+- Let pages dry ~1 minute before stacking.
+- Each cutout is a true **2×2 inch** photo.
 
 ## Disclaimer
 
