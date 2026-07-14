@@ -7,3 +7,9 @@ numpy>=1.26.0
 opencv-python-headless>=4.10.0,<5
 rembg>=2.0.59
 onnxruntime>=1.19.0
+pydantic-settings>=2.5.0
+stripe>=11.0.0
+# Optional: more robust face detection (falls back to OpenCV Haar)
+mediapipe>=0.10.14; platform_system != "Darwin" or platform_machine != "arm64"
+# On Apple Silicon, install mediapipe if a wheel is available for your Python version:
+#   pip install mediapipe

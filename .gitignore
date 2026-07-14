@@ -32,4 +32,6 @@ outputs/
 *~
 
 # Local secrets
+.env
 .env.local
+*.db

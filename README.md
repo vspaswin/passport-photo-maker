@@ -1,136 +1,117 @@
 # Passport Photo Maker
 
-**Local web tool** that turns any portrait into **print-ready** and **digital upload** photos for official documents.
+**Production-ready** service to validate and convert photos into **Indian passport / visa / OCI** format (print + digital upload).
 
-**v0.1** focuses on **Indian Passport / Visa / OCI** photos (VFS Global / MEA / ICAO-style 2×2").
+- Strict automated QC (as-is + convertible + final)
+- White background cutout (`u2net_human_seg`)
+- Face detection: MediaPipe when available, OpenCV Haar fallback
+- Print sheets: **Letter 8.5×11** (Canon GP-701), A4, 4×6, single 2×2
+- **Job-based downloads** (multi-user safe, TTL)
+- **Freemium credits** + optional **Stripe Checkout**
+- Web UI + **CLI** + **Docker**
 
-- Fully **local** — photos stay on your machine  
-- **Strict automated QC** — rejects photos that would likely fail passport review (no face, blur, dark glasses, multi-person, bad lighting, etc.). **Downloads are only created after all checks pass.**  
-- **White background** removal (on-device)  
-- Face-aware crop with official **head height** and **eye line** targets  
-- Exports: single 2×2", 4×6 sheet, **Letter 8.5×11 sheet** (GP-701), A4 sheet, portal JPEGs (≈10–100 KB)
+> Automated QC is **not** official government approval. Final acceptance is decided by VFS / passport authorities.
 
-## Quick start
+## Quick start (local)
 
 ```bash
-# Python 3.9+
 cd passport-photo-maker
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Run the local web app
 python -m app.main
 # open http://127.0.0.1:8765
 ```
 
-First conversion may download a small ONNX model for background removal (`rembg` / u2net). That stays in your user cache.
+Optional MediaPipe (better faces):
 
-## What you get
+```bash
+pip install mediapipe
+```
 
-| File | Purpose |
-|------|---------|
-| `*_upload_600.jpg` | Website / portal upload (try this first) |
-| `*_upload_350.jpg` | Smaller fallback if the portal rejects size |
-| `*_PRINT_2x2_inch.jpg` | Single 2×2" print @ 600 dpi |
-| `*_sheet_4x6.jpg` | 6 copies on 4×6 photo paper |
-| `*_sheet_letter.jpg` | **12 true 2×2"** on **US Letter 8.5×11** (Canon GP-701 / glossy Letter) |
-| `*_sheet_a4.jpg` | 12 copies on A4 (print at **100%** scale) |
-| `*_master.jpg` | High-res square archive |
-| `*_all.zip` | Everything above + README |
+## CLI
 
-## Indian passport rules (summary)
+```bash
+# Check only
+python cli.py check photo.jpg
 
-Aligned with the VFS photo specification used for Passport / Visa / OCI:
+# Convert one
+python cli.py convert photo.jpg -o ./out
 
-- Colour photo **2 × 2 inches** (51 × 51 mm)
-- Plain **white** background, no shadows
-- Full frontal face, eyes open, natural expression
-- Head height (hair → chin) about **1–1⅜ inches**
-- Eye line about **1⅛–1⅓ inches** from the bottom of the photo
-- Coloured clothing (not pure white)
-- Prefer a true likeness — avoid heavy beautify filters
+# Batch folder
+python cli.py batch ./photos -o ./batch_out
+```
 
-Official reference (USA VFS one-pager):  
-[photo-specifiation.pdf](https://visa.vfsglobal.com/one-pager/india/united-states-of-america/passport-services/pdf/photo-specifiation.pdf)
+## Monetization (freemium + Stripe)
 
-## Privacy
+Defaults (env-overridable):
 
-- Server binds to **127.0.0.1** only  
-- No accounts, no cloud upload in the default app  
-- Processing uses local libraries (`Pillow`, `OpenCV`, `rembg`)
+| | Free / day | After free |
+|--|------------|------------|
+| Checks | 20 | Unlimited with credits |
+| Converts | 3 | 1 credit each |
+
+1. Create products/prices in [Stripe Dashboard](https://dashboard.stripe.com/)
+2. Copy `.env.example` → `.env` and set:
+
+```env
+APP_ENV=production
+APP_URL=https://your-domain.com
+SECRET_KEY=long-random-string
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_STARTER=price_...
+STRIPE_PRICE_PRO=price_...
+```
+
+3. Webhook endpoint: `POST /api/billing/webhook` → event `checkout.session.completed`
+
+Without Stripe keys the app still runs; Buy buttons stay disabled and free daily quotas apply.
+
+## Docker
+
+```bash
+cp .env.example .env   # edit secrets
+docker compose up --build -d
+```
+
+Data (jobs + credits DB) persists in volume `ppm-data`.
+
+## API overview
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Liveness |
+| GET | `/api/status` | Model + usage + pricing |
+| POST | `/api/validate` | Check as-is + convertible |
+| POST | `/api/convert` | Convert (costs free slot or credit) |
+| POST | `/api/batch` | Multi-file convert |
+| GET | `/api/jobs/{id}` | Job metadata |
+| GET | `/api/jobs/{id}/files/{name}` | Download |
+| POST | `/api/billing/checkout` | Stripe session |
+| POST | `/api/billing/webhook` | Stripe webhook |
+
+## Print on Canon GP-701 (Letter glossy)
+
+Use **`*_sheet_letter.jpg`**:
+
+- Paper: **Letter** + **Photo Glossy** + **High/Best**
+- Scale: **100% / Actual size**
+- Load glossy side correctly; no Draft; dry before stacking
 
 ## Project layout
 
 ```
 app/
-  main.py           # FastAPI web app
-  engine/
-    specs.py        # Document type definitions (extensible)
-    process.py      # Background, face crop, exports
-  templates/        # UI
-  static/
+  core/config.py      # env settings
+  jobs/store.py       # SQLite jobs + credits
+  billing/            # Stripe
+  engine/             # face, validate, process, specs
+  main.py             # FastAPI
+cli.py
+Dockerfile
+docker-compose.yml
 ```
-
-Adding another country later means a new `PhotoSpec` in `specs.py` and (if needed) small framing tweaks — the pipeline is shared.
-
-## CLI-style one-shot (optional)
-
-```bash
-source .venv/bin/activate
-python - <<'PY'
-from pathlib import Path
-from app.engine import process_photo
-
-data = Path("my-photo.jpg").read_bytes()
-result = process_photo(data, doc_type="indian-passport")
-out = Path("output"); out.mkdir(exist_ok=True)
-for name, blob in result.files.items():
-    (out / name).write_bytes(blob)
-print("Wrote", len(result.files), "files to", out)
-print("Warnings:", result.warnings)
-PY
-```
-
-## Development
-
-```bash
-pip install -r requirements.txt
-python -m app.main
-# API docs: http://127.0.0.1:8765/docs
-```
-
-## Two-step validation
-
-| Mode | API | What it does |
-|------|-----|----------------|
-| **Check only** | `POST /api/validate` | **As-is** QC (already passport-ready?) + **Convertible** QC (can Convert fix it?) |
-| **Convert** | `POST /api/convert` | Requires **convertible** → white bg + crop → **final output QC**. Downloads only if final passes. |
-
-**Convertible** allows messy room backgrounds (converter replaces them).  
-**As-is** / **final output** require clean white background, geometry, eyes, etc.
-
-When conversion passes, the ZIP includes `VALIDATION_PASSED.txt` with check details.
-
-## Printing on Canon GP-701 (Letter glossy)
-
-Use **`indian-passport_sheet_letter.jpg`** (not A4).
-
-| Setting | Value |
-|---------|--------|
-| Paper size | **Letter** (8.5×11) |
-| Paper type | **Photo Glossy** (or HP “Photographic Glossy”) |
-| Quality | **High / Best** (not Draft) |
-| Scale | **100% / Actual size** (turn off Fit to Page) |
-| Borderless | Optional; for cutouts, normal margins + true 2×2 size matter more |
-
-- Load **glossy side** the way your tray icon shows (often face-down on HP ENVY).
-- Let pages dry ~1 minute before stacking.
-- Each cutout is a true **2×2 inch** photo.
-
-## Disclaimer
-
-Automated QC greatly reduces reject risk but is **not a legal guarantee** of acceptance by VFS / MEA / consulate. Always follow the latest official photo rules for your channel.
 
 ## License
 

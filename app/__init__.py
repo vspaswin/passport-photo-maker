@@ -1,3 +1,3 @@
 """Passport Photo Maker — local tool for ID / passport photos."""
 
-__version__ = "0.3.2"
+__version__ = "1.0.0"

@@ -18,9 +18,12 @@
   const rejectBadge = document.getElementById("rejectBadge");
   const passBadge = document.getElementById("passBadge");
   const infoBadge = document.getElementById("infoBadge");
+  const usageBox = document.getElementById("usageBox");
+  const progress = document.getElementById("progress");
+  const disclaimer = document.getElementById("disclaimer");
+  const printGuide = document.getElementById("printGuide");
 
   let selectedFile = null;
-  let modelReady = true;
 
   const DESCRIPTIONS = {
     "indian-passport":
@@ -35,6 +38,23 @@
   function setBusy(busy) {
     checkBtn.disabled = busy || !selectedFile;
     convertBtn.disabled = busy || !selectedFile;
+  }
+
+  function setProgress(active) {
+    if (!active) {
+      progress.classList.add("hidden");
+      progress.querySelectorAll("[data-step]").forEach((el) => el.classList.remove("on", "done"));
+      return;
+    }
+    progress.classList.remove("hidden");
+    const order = ["check", "bg", "frame", "qc"];
+    const idx = order.indexOf(active);
+    progress.querySelectorAll("[data-step]").forEach((el) => {
+      const step = el.getAttribute("data-step");
+      const si = order.indexOf(step);
+      el.classList.toggle("on", si === idx);
+      el.classList.toggle("done", si < idx);
+    });
   }
 
   function updateDocDescription() {
@@ -63,7 +83,6 @@
   fileInput.addEventListener("change", () => {
     if (fileInput.files && fileInput.files[0]) setFile(fileInput.files[0]);
   });
-
   ["dragenter", "dragover"].forEach((evt) => {
     dropzone.addEventListener(evt, (e) => {
       e.preventDefault();
@@ -83,7 +102,8 @@
 
   function pill(label, ok) {
     const span = document.createElement("span");
-    span.className = "pill " + (ok === true ? "ok" : ok === false ? "bad" : "neutral");
+    span.className =
+      "pill " + (ok === true ? "ok" : ok === false ? "bad" : "neutral");
     span.textContent = label;
     return span;
   }
@@ -108,7 +128,6 @@
     h.className = "val-title " + (titleClass || "");
     h.textContent = title;
     wrap.appendChild(h);
-
     const issues = (report && report.issues) || [];
     if (!issues.length) {
       const p = document.createElement("p");
@@ -131,16 +150,36 @@
     return wrap;
   }
 
+  function updateUsage(usage) {
+    if (!usage || !usageBox) return;
+    usageBox.innerHTML =
+      `Today: <strong>${usage.checks}</strong> checks · ` +
+      `<strong>${usage.converts}</strong> converts · ` +
+      `<strong>${usage.credit_balance}</strong> credits`;
+  }
+
+  async function refreshStatus() {
+    try {
+      const res = await fetch("/api/status");
+      const data = await res.json();
+      updateUsage(data.usage);
+    } catch (_) {}
+  }
+
   function renderCheckResult(data) {
     showResultShell();
+    setProgress(null);
     preview.classList.add("hidden");
     preview.removeAttribute("src");
     downloads.classList.add("hidden");
     fileList.innerHTML = "";
     warningsEl.innerHTML = "";
+    printGuide.classList.add("hidden");
     passBadge.classList.add("hidden");
     rejectBadge.classList.add("hidden");
     infoBadge.classList.remove("hidden");
+    disclaimer.classList.remove("hidden");
+    disclaimer.textContent = data.disclaimer || "";
 
     const rec = data.recommendation;
     const labels = {
@@ -156,19 +195,15 @@
     metricsEl.innerHTML = "";
     metricsEl.appendChild(pill("As-is", !!data.as_is?.passed));
     metricsEl.appendChild(pill("Convertible", !!data.convertible?.passed));
-    metricsEl.appendChild(pill("Recommendation: " + (rec || "?"), rec !== "retake"));
 
     validationBox.innerHTML = "";
     const summary = document.createElement("p");
     summary.className = "summary-text";
     summary.textContent = data.summary || "";
     validationBox.appendChild(summary);
-
     validationBox.appendChild(
       renderIssueList(
-        data.as_is?.passed
-          ? "As-is check — passed"
-          : "As-is check — failed (not passport-ready yet)",
+        data.as_is?.passed ? "As-is — passed" : "As-is — failed",
         data.as_is,
         data.as_is?.passed ? "ok" : "bad"
       )
@@ -176,32 +211,32 @@
     validationBox.appendChild(
       renderIssueList(
         data.convertible?.passed
-          ? "Convertible check — passed (Convert can try)"
-          : "Convertible check — failed (cannot auto-fix)",
+          ? "Convertible — passed"
+          : "Convertible — failed",
         data.convertible,
         data.convertible?.passed ? "ok" : "bad"
       )
     );
+    updateUsage(data.usage);
   }
 
   function renderConvertSuccess(data) {
     showResultShell();
+    setProgress(null);
     preview.classList.remove("hidden");
     preview.src = data.preview_data_url;
     passBadge.classList.remove("hidden");
     rejectBadge.classList.add("hidden");
     infoBadge.classList.add("hidden");
     downloads.classList.remove("hidden");
+    disclaimer.classList.remove("hidden");
+    disclaimer.textContent = data.disclaimer || "";
 
     metricsEl.innerHTML = "";
     const m = data.metrics || {};
     metricsEl.appendChild(pill("Final QC passed", true));
-    metricsEl.appendChild(
-      pill(`Head height: ${m.head_height_in}"`, m.head_height_ok === 1)
-    );
-    metricsEl.appendChild(
-      pill(`Eyes from bottom: ${m.eye_from_bottom_in}"`, m.eye_position_ok === 1)
-    );
+    if (data.job_id) metricsEl.appendChild(pill("Job " + data.job_id.slice(0, 8), true));
+    metricsEl.appendChild(pill(`Head: ${m.head_height_in}"`, m.head_height_ok === 1));
     if (m.upload_600_kb != null) {
       metricsEl.appendChild(pill(`Upload 600: ${m.upload_600_kb} KB`, true));
     }
@@ -210,8 +245,22 @@
     const p = document.createElement("p");
     p.className = "summary-text";
     p.textContent =
-      "Converted and re-validated. Final photo passed automated Indian passport QC.";
+      "Converted and re-validated. Ready for portal upload and physical print.";
     validationBox.appendChild(p);
+
+    if (data.print_tip) {
+      printGuide.classList.remove("hidden");
+      printGuide.innerHTML =
+        `<h3>Print guide (Letter / GP-701)</h3><p>Use <code>${escapeHtml(
+          data.print_tip.letter_file || "*_sheet_letter.jpg"
+        )}</code></p><ul>` +
+        (data.print_tip.settings || [])
+          .map((s) => `<li>${escapeHtml(s)}</li>`)
+          .join("") +
+        "</ul>";
+    } else {
+      printGuide.classList.add("hidden");
+    }
 
     warningsEl.innerHTML = "";
     if (data.warnings && data.warnings.length) {
@@ -223,7 +272,7 @@
       const li = document.createElement("li");
       const left = document.createElement("div");
       left.className = "meta";
-      left.textContent = `${f.name} · ${f.size_kb} KB`;
+      left.textContent = `${f.name}${f.size_kb != null ? " · " + f.size_kb + " KB" : ""}`;
       const a = document.createElement("a");
       a.href = f.download_url;
       a.textContent = "Download";
@@ -232,54 +281,49 @@
       li.appendChild(a);
       fileList.appendChild(li);
     });
+    updateUsage(data.usage);
   }
 
   function renderConvertFailure(data) {
     showResultShell();
+    setProgress(null);
     preview.classList.add("hidden");
     preview.removeAttribute("src");
     passBadge.classList.add("hidden");
     rejectBadge.classList.remove("hidden");
     infoBadge.classList.add("hidden");
     downloads.classList.add("hidden");
+    printGuide.classList.add("hidden");
     fileList.innerHTML = "";
     metricsEl.innerHTML = "";
     metricsEl.appendChild(
       pill(
-        data.error === "output_validation_failed"
-          ? "Converted but final QC failed"
-          : "Not convertible",
+        data.error === "payment_required"
+          ? "Credits required"
+          : data.error === "output_validation_failed"
+            ? "Final QC failed"
+            : "Not convertible",
         false
       )
     );
+    disclaimer.classList.add("hidden");
     warningsEl.innerHTML = "";
     validationBox.innerHTML = "";
     const p = document.createElement("p");
     p.className = "summary-text";
-    p.textContent = data.message || "Conversion rejected.";
+    p.textContent = data.message || "Rejected.";
     validationBox.appendChild(p);
-    validationBox.appendChild(
-      renderIssueList("Issues", data.validation, "bad")
-    );
-  }
-
-  async function refreshModelStatus() {
-    try {
-      const res = await fetch("/api/status");
-      const data = await res.json();
-      modelReady = !!data.model_ready;
-    } catch (_) {
-      modelReady = true;
+    if (data.validation) {
+      validationBox.appendChild(renderIssueList("Issues", data.validation, "bad"));
     }
+    updateUsage(data.usage);
   }
 
   async function postForm(url) {
     const form = new FormData();
     form.append("file", selectedFile);
     form.append("doc_type", docType.value);
-    form.append("remove_bg", "true");
-    form.append("strict", "true");
-    const res = await fetch(url, { method: "POST", body: form });
+    const res = await fetch(url, { method: "POST", body: form, credentials: "same-origin" });
     const data = await res.json().catch(() => ({}));
     return { res, data };
   }
@@ -287,67 +331,91 @@
   checkBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     setBusy(true);
-    setStatus("Checking photo (as-is + convertible)…", "");
+    setProgress("check");
+    setStatus("Checking photo…", "");
     try {
       const { res, data } = await postForm("/api/validate");
-      if (!res.ok) {
-        throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+      if (res.status === 429) {
+        renderConvertFailure(data);
+        setStatus(data.message || "Check quota exceeded.", "error");
+        return;
       }
+      if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       renderCheckResult(data);
-      const kind =
-        data.recommendation === "retake"
-          ? "error"
-          : data.recommendation === "convertible"
-            ? ""
-            : "ok";
-      setStatus(data.summary || "Check complete.", kind);
+      setStatus(data.summary || "Check complete.", data.recommendation === "retake" ? "error" : "ok");
     } catch (err) {
       console.error(err);
       setStatus(err.message || "Check failed.", "error");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   });
 
   convertBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     setBusy(true);
-    await refreshModelStatus();
-    if (!modelReady) {
-      setStatus("Converting… may download model once (~170 MB)…", "");
-    } else {
-      setStatus("Checking convertible → converting → final QC…", "");
-    }
+    setProgress("check");
+    setStatus("Validating → removing background → framing → final QC…", "");
+    // Visual progress simulation while server works
+    const timers = [
+      setTimeout(() => setProgress("bg"), 400),
+      setTimeout(() => setProgress("frame"), 2000),
+      setTimeout(() => setProgress("qc"), 4000),
+    ];
     try {
       const { res, data } = await postForm("/api/convert");
+      timers.forEach(clearTimeout);
+      if (res.status === 402 || res.status === 429) {
+        renderConvertFailure(data);
+        setStatus(data.message || "Payment or quota required.", "error");
+        return;
+      }
       if (res.status === 422 || data.ok === false) {
         renderConvertFailure(data);
         setStatus(data.message || "Conversion rejected.", "error");
         return;
       }
-      if (!res.ok) {
-        const detail = data.detail;
-        throw new Error(
-          typeof detail === "string"
-            ? detail
-            : data.message || `HTTP ${res.status}`
-        );
-      }
+      if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       renderConvertSuccess(data);
-      modelReady = true;
-      setStatus(
-        "Passed final QC. Download print + digital files below.",
-        "ok"
-      );
+      setStatus("Passed automated QC. Download files below.", "ok");
     } catch (err) {
+      timers.forEach(clearTimeout);
       console.error(err);
       setStatus(err.message || "Conversion failed.", "error");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
+  });
+
+  document.querySelectorAll(".buy-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const pack = btn.getAttribute("data-pack");
+      const form = new FormData();
+      form.append("pack_id", pack);
+      try {
+        const res = await fetch("/api/billing/checkout", {
+          method: "POST",
+          body: form,
+          credentials: "same-origin",
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.message || "Checkout failed");
+        if (data.checkout_url) window.location.href = data.checkout_url;
+      } catch (err) {
+        setStatus(err.message || "Checkout failed", "error");
+      }
+    });
   });
 
   docType.addEventListener("change", updateDocDescription);
   updateDocDescription();
-  refreshModelStatus();
+  refreshStatus();
+
+  const params = new URLSearchParams(location.search);
+  if (params.get("billing") === "success") {
+    setStatus("Payment received — credits will appear shortly after webhook.", "ok");
+    refreshStatus();
+  }
 })();

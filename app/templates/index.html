@@ -3,24 +3,27 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Passport Photo Maker</title>
+  <title>{{ app_name }}</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="page">
     <header class="header">
       <div>
-        <h1>Passport Photo Maker</h1>
-        <p class="tagline">Local · Private · Check or convert · Indian passport</p>
+        <h1>{{ app_name }}</h1>
+        <p class="tagline">Validate · Convert · Print · Freemium credits</p>
       </div>
-      <span class="badge">v{{ version }}</span>
+      <div class="header-right">
+        <span class="badge">v{{ version }}</span>
+        <div id="usageBox" class="usage-box">Loading usage…</div>
+      </div>
     </header>
 
     <main class="grid">
       <section class="card">
-        <h2>1. Document type</h2>
+        <h2>1. Document</h2>
         <label class="field">
-          <span>Document</span>
+          <span>Type</span>
           <select id="docType">
             {% for d in doc_types %}
             <option value="{{ d.id }}">{{ d.title }}</option>
@@ -31,39 +34,43 @@
       </section>
 
       <section class="card">
-        <h2>2. Upload photo</h2>
+        <h2>2. Upload</h2>
         <div id="dropzone" class="dropzone" tabindex="0">
           <input type="file" id="fileInput" accept="image/*" hidden />
-          <p><strong>Drop a photo here</strong> or click to browse</p>
-          <p class="hint">Front face · eyes open · good light · colour photo</p>
+          <p><strong>Drop a photo</strong> or click to browse</p>
+          <p class="hint">Front face · eyes open · colour · good light</p>
           <p id="fileName" class="file-name"></p>
         </div>
         <div class="btn-row">
           <button id="checkBtn" class="btn secondary" disabled>Check only</button>
           <button id="convertBtn" class="btn primary" disabled>Convert to passport</button>
         </div>
+        <div id="progress" class="progress hidden">
+          <div class="progress-steps">
+            <span data-step="check">Check</span>
+            <span data-step="bg">Background</span>
+            <span data-step="frame">Frame</span>
+            <span data-step="qc">Final QC</span>
+          </div>
+        </div>
         <p id="status" class="status" aria-live="polite"></p>
-        <ul class="mode-help">
-          <li><strong>Check only</strong> — does it pass as-is? Can Convert fix it?</li>
-          <li><strong>Convert</strong> — if convertible, fix bg/crop, then final QC</li>
-        </ul>
       </section>
 
       <section class="card result-card">
         <h2>3. Result</h2>
-        <div id="emptyState" class="empty">
-          Upload a photo, then Check or Convert.
-        </div>
+        <div id="emptyState" class="empty">Upload a photo, then Check or Convert.</div>
         <div id="result" class="result hidden">
           <div class="result-left">
             <img id="preview" alt="Passport photo preview" class="hidden" />
             <div id="rejectBadge" class="reject-badge hidden">Not submittable</div>
-            <div id="passBadge" class="pass-badge hidden">Passed final QC</div>
+            <div id="passBadge" class="pass-badge hidden">Passed automated QC</div>
             <div id="infoBadge" class="info-badge hidden"></div>
           </div>
           <div class="result-right">
             <div class="metrics" id="metrics"></div>
+            <p id="disclaimer" class="disclaimer hidden"></p>
             <div id="validationBox" class="validation-box"></div>
+            <div id="printGuide" class="print-guide hidden"></div>
             <div id="warnings" class="warnings"></div>
             <div id="downloads" class="downloads hidden">
               <h3>Downloads</h3>
@@ -75,26 +82,40 @@
     </main>
 
     <section class="card tips">
-      <h2>How validation works</h2>
-      <ul>
-        <li><strong>As-is check</strong> — already looks like a passport photo (white bg, framing, eyes…)</li>
-        <li><strong>Convertible check</strong> — face/eyes/quality good enough for the converter to fix (messy room background is OK)</li>
-        <li><strong>After Convert</strong> — final 2×2 must pass full Indian passport QC or downloads are blocked</li>
-      </ul>
+      <h2>Print on Canon GP-701 (Letter glossy 8.5×11)</h2>
+      <ol class="print-ol">
+        <li>After Convert, download <code>*_sheet_letter.jpg</code> (not A4).</li>
+        <li>Print dialog: <strong>Letter</strong> + <strong>Photo Glossy</strong> + <strong>High/Best</strong>.</li>
+        <li>Scale: <strong>100% / Actual size</strong> — turn off Fit to Page.</li>
+        <li>Load glossy side correctly (check tray icon). Avoid Draft. Dry ~1 min before stacking.</li>
+        <li>Cut the 2×2 squares. Each photo is a true 2 inch × 2 inch print.</li>
+      </ol>
+      <p class="hint">Plain Letter paper: Letter + Plain/Stationery for layout tests only.</p>
+    </section>
+
+    <section class="card tips" id="pricingCard">
+      <h2>Pricing</h2>
       <p class="hint">
-        <strong>Letter glossy photo paper (Canon GP-701 8.5×11):</strong>
-        after Convert, print <code>*_sheet_letter.jpg</code> —
-        Paper size <strong>Letter</strong>, type <strong>Photo Glossy</strong>, quality <strong>High/Best</strong>,
-        scale <strong>100% / Actual size</strong> (not Fit to Page). Load glossy side correctly; avoid Draft; let dry before stacking.
+        Free: {{ pricing.free_daily_checks }} checks / day, {{ pricing.free_daily_converts }} converts / day.
+        Each convert costs {{ pricing.convert_credit_cost }} credit after free quota.
       </p>
-      <p class="hint">
-        A4: use <code>*_sheet_a4.jpg</code>. 4×6 paper: use <code>*_sheet_4x6.jpg</code>.
-        Single photo: <code>*_PRINT_2x2_inch.jpg</code> at actual size.
-      </p>
+      <div class="pack-row">
+        {% for p in pricing.packs %}
+        <div class="pack">
+          <strong>{{ p.label }}</strong>
+          <button class="btn secondary buy-btn" data-pack="{{ p.id }}" {% if not pricing.stripe_enabled %}disabled{% endif %}>
+            {% if pricing.stripe_enabled %}Buy{% else %}Stripe not configured{% endif %}
+          </button>
+        </div>
+        {% endfor %}
+      </div>
+      {% if not pricing.stripe_enabled %}
+      <p class="hint">Set <code>STRIPE_SECRET_KEY</code> and price IDs in <code>.env</code> to enable paid packs.</p>
+      {% endif %}
     </section>
 
     <footer class="footer">
-      <span>Open source · runs at <code>http://127.0.0.1:8765</code></span>
+      <span>Production-ready · local or cloud · <code>python -m app.main</code> · CLI: <code>python cli.py --help</code></span>
     </footer>
   </div>
   <script src="/static/app.js"></script>

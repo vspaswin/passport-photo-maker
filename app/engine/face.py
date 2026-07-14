@@ -131,19 +131,48 @@ def to_bgr_gray(im: Image.Image) -> Tuple[np.ndarray, np.ndarray]:
     return bgr, gray
 
 
-def detect_faces(gray: np.ndarray) -> List[BBox]:
-    face_cascade, _, _ = _load_cascades()
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.08, minNeighbors=6, minSize=(80, 80)
-    )
-    if len(faces) == 0:
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.05, minNeighbors=4, minSize=(60, 60)
-        )
-    if len(faces) == 0:
+def _detect_faces_mediapipe(bgr: np.ndarray) -> List[BBox]:
+    """Optional MediaPipe face detector (more robust than Haar)."""
+    try:
+        from app.core.config import get_settings
+
+        if not get_settings().use_mediapipe:
+            return []
+    except Exception:
+        pass
+    try:
+        import mediapipe as mp
+    except ImportError:
         return []
-    boxes = [tuple(map(int, f)) for f in faces]
+
+    h, w = bgr.shape[:2]
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    boxes: List[BBox] = []
+    try:
+        # mediapipe 0.10+ solutions still work on many installs
+        mp_face = mp.solutions.face_detection
+        with mp_face.FaceDetection(
+            model_selection=1, min_detection_confidence=0.5
+        ) as detector:
+            result = detector.process(rgb)
+            if not result.detections:
+                return []
+            for det in result.detections:
+                bb = det.location_data.relative_bounding_box
+                x = max(0, int(bb.xmin * w))
+                y = max(0, int(bb.ymin * h))
+                bw = min(w - x, int(bb.width * w))
+                bh = min(h - y, int(bb.height * h))
+                if bw > 20 and bh > 20:
+                    boxes.append((x, y, bw, bh))
+    except Exception:
+        return []
     boxes.sort(key=lambda b: b[2] * b[3], reverse=True)
+    return boxes
+
+
+def _dedupe_faces(boxes: List[BBox]) -> List[BBox]:
+    boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
     cleaned: List[BBox] = []
     for box in boxes:
         x, y, w, h = box
@@ -157,6 +186,27 @@ def detect_faces(gray: np.ndarray) -> List[BBox]:
         if not duplicate:
             cleaned.append(box)
     return cleaned
+
+
+def detect_faces(gray: np.ndarray, bgr: Optional[np.ndarray] = None) -> List[BBox]:
+    # Prefer MediaPipe when available and BGR provided
+    if bgr is not None:
+        mp_boxes = _detect_faces_mediapipe(bgr)
+        if mp_boxes:
+            return _dedupe_faces(mp_boxes)
+
+    face_cascade, _, _ = _load_cascades()
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.08, minNeighbors=6, minSize=(80, 80)
+    )
+    if len(faces) == 0:
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.05, minNeighbors=4, minSize=(60, 60)
+        )
+    if len(faces) == 0:
+        return []
+    boxes = [tuple(map(int, f)) for f in faces]
+    return _dedupe_faces(boxes)
 
 
 def detect_eyes(gray: np.ndarray, face: BBox) -> List[BBox]:
@@ -226,7 +276,7 @@ def analyze_image(im: Image.Image) -> FaceAnalysis:
     """Run face/eye detection and quality metrics once."""
     w, h = im.size
     bgr, gray = to_bgr_gray(im)
-    faces = detect_faces(gray)
+    faces = detect_faces(gray, bgr=bgr)
 
     analysis = FaceAnalysis(
         image_w=w,

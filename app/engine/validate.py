@@ -420,7 +420,7 @@ def validate_output_photo(framed: Image.Image, spec: PhotoSpec) -> ValidationRep
         )
 
     bgr, gray = to_bgr_gray(framed)
-    faces = detect_faces(gray)
+    faces = detect_faces(gray, bgr=bgr)
     checks["output_face_count"] = len(faces)
 
     if not faces:

@@ -46,9 +46,20 @@ def _get_rembg_session():
     if _rembg_session is None:
         from rembg import new_session
 
-        # u2net is the default; good balance of quality/speed for portraits
-        _rembg_session = new_session("u2net")
-        logger.info("Loaded rembg session (u2net)")
+        model = "u2net_human_seg"
+        try:
+            from app.core.config import get_settings
+
+            model = get_settings().rembg_model or model
+        except Exception:
+            pass
+        try:
+            _rembg_session = new_session(model)
+            logger.info("Loaded rembg session (%s)", model)
+        except Exception:
+            logger.warning("Failed to load %s; falling back to u2net", model)
+            _rembg_session = new_session("u2net")
+            logger.info("Loaded rembg session (u2net)")
     return _rembg_session
 
 
@@ -101,9 +112,9 @@ def _composite_clean_white(
     alpha = arr[:, :, 3] / 255.0
 
     # 1) Harden soft alpha so semi-transparent grey fringes disappear.
-    #    Pixels below cut → background; above keep → subject; in between ramp.
-    cut = 0.50
-    keep = 0.92
+    #    Slightly more aggressive cut for cleaner passport whites.
+    cut = 0.55
+    keep = 0.94
     a = np.clip((alpha - cut) / max(keep - cut, 1e-6), 0.0, 1.0)
 
     # 2) Morphological cleanup: drop isolated speckles, close tiny holes in mask.
