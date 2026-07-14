@@ -124,10 +124,30 @@
     });
   }
 
+  let modelReady = true;
+
+  async function refreshModelStatus() {
+    try {
+      const res = await fetch("/api/status");
+      const data = await res.json();
+      modelReady = !!data.model_ready;
+    } catch (_) {
+      modelReady = true; // don't scare the user if status fails
+    }
+  }
+
   convertBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     convertBtn.disabled = true;
-    setStatus("Converting… first run may download an AI model for background removal.", "");
+    await refreshModelStatus();
+    if (removeBg.checked && !modelReady) {
+      setStatus(
+        "Converting… downloading background-removal model (one-time, ~170 MB)…",
+        ""
+      );
+    } else {
+      setStatus("Converting…", "");
+    }
 
     const form = new FormData();
     form.append("file", selectedFile);
@@ -141,6 +161,7 @@
         throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       }
       renderResult(data);
+      modelReady = true;
       setStatus("Done. Download print and digital files below.", "ok");
     } catch (err) {
       console.error(err);
@@ -152,4 +173,5 @@
 
   docType.addEventListener("change", updateDocDescription);
   updateDocDescription();
+  refreshModelStatus();
 })();

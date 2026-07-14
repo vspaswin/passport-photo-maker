@@ -51,9 +51,28 @@ async def index(request: Request):
     )
 
 
+def _u2net_model_ready() -> bool:
+    """True if rembg's default u2net weights are already cached locally."""
+    # rembg stores u2net.onnx under ~/.u2net/
+    path = Path.home() / ".u2net" / "u2net.onnx"
+    return path.is_file() and path.stat().st_size > 1_000_000
+
+
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "version": __version__}
+    return {"ok": True, "version": __version__, "model_ready": _u2net_model_ready()}
+
+
+@app.get("/api/status")
+async def status():
+    ready = _u2net_model_ready()
+    return {
+        "ok": True,
+        "version": __version__,
+        "model_ready": ready,
+        "model_name": "u2net",
+        "model_path": str(Path.home() / ".u2net" / "u2net.onnx"),
+    }
 
 
 @app.get("/api/document-types")
