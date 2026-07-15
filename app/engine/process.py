@@ -80,8 +80,8 @@ def remove_background_to_white(
     """Remove background and composite onto solid colour with clean edges.
 
     rembg's soft alpha often leaves a white/grey halo on passport white.
-    We skip soft alpha-matting (it widens the fringe), harden the mask,
-    strip colour fringing, and force pure white outside the subject.
+    We skip soft alpha-matting (it widens the fringe), harden body edges,
+    but *restore dark hair fringes* so the hairline does not look chopped.
     """
     from rembg import remove
 
@@ -97,75 +97,158 @@ def remove_background_to_white(
     return _composite_clean_white(rgba, bg_rgb)
 
 
+def _hair_fringe_mask(
+    rgb: np.ndarray,
+    alpha_raw: np.ndarray,
+) -> np.ndarray:
+    """Find dark hair-like pixels in rembg's soft matte (wisps / hairline).
+
+    These are dark, low-chroma, partial-alpha samples that aggressive erode
+    would otherwise delete — causing the "helmet / cookie-cutter" hair look.
+    """
+    lum = rgb.mean(axis=2)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+    # True dark strands only (avoid grey matte / skin)
+    hair = (
+        (alpha_raw >= 0.20)
+        & (alpha_raw <= 0.96)
+        & (lum <= 80.0)
+        & (chroma <= 48.0)
+    )
+    core = (alpha_raw >= 0.60).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    near_core = cv2.dilate(core, k, iterations=2) > 0
+    hair = hair & near_core
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    hair_u8 = cv2.morphologyEx(hair.astype(np.uint8) * 255, cv2.MORPH_CLOSE, k3, iterations=1)
+    return hair_u8 > 0
+
+
 def _composite_clean_white(
     rgba: Image.Image,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
 ) -> Image.Image:
     """Composite RGBA cutout onto pure white without soft edge outlines.
 
-    Strategy:
-      1. High alpha threshold → kill semi-transparent fringe
-      2. Morph open/close + erode → pull mask inside contaminated rim
-      3. Near-binary alpha (1px AA only) for a crisp silhouette
-      4. Un-premultiply edge colours, composite on pure white
-      5. Scrub residual pale/mid greys and eat light halo from outside
+    Body edges are hardened to kill white/grey halo. Dark hair uses a softer
+    path: keep strand matte (dark-on-white looks natural) without forcing a
+    solid black outline from aggressive un-premultiply.
     """
     arr = np.array(rgba).astype(np.float32)
     rgb = arr[:, :, :3]
     alpha = arr[:, :, 3] / 255.0
-    # Also use original alpha for un-premultiply (before we harden).
     alpha_raw = alpha.copy()
 
-    # 1) Aggressive harden: rembg soft matte is mostly <0.6 on the fringe.
-    cut = 0.62
-    keep = 0.92
-    a = np.clip((alpha - cut) / max(keep - cut, 1e-6), 0.0, 1.0)
-
-    # 2) Morphological cleanup + erode the outer contaminated ring.
-    a_u8 = (a * 255).astype(np.uint8)
+    hair = _hair_fringe_mask(rgb, alpha_raw)
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_OPEN, k5, iterations=1)
-    a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_CLOSE, k5, iterations=1)
-    # 2× erode eats ~2–3 px of soft fringe (main white-outline source).
-    a_u8 = cv2.erode(a_u8, k5, iterations=2)
-    a = a_u8.astype(np.float32) / 255.0
+    hair_keep = cv2.dilate(hair.astype(np.uint8) * 255, k3, iterations=1) > 0
 
-    # 3) Near-binary mask with a tiny 1px anti-alias (not a soft glow).
-    a = np.where(a < 0.40, 0.0, np.where(a > 0.80, 1.0, a))
-    a = cv2.GaussianBlur(a, (3, 3), 0.45)
-    a = np.clip(a, 0.0, 1.0)
-    a = np.where(a < 0.25, 0.0, np.where(a > 0.90, 1.0, a))
+    # --- Body mask: hard cut + erode (kills clothing halo) ---
+    cut_b, keep_b = 0.58, 0.92
+    a_body = np.clip((alpha - cut_b) / max(keep_b - cut_b, 1e-6), 0.0, 1.0)
+    a_b_u8 = (a_body * 255).astype(np.uint8)
+    a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_OPEN, k3, iterations=1)
+    a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_CLOSE, k5, iterations=1)
+    a_b_u8 = cv2.erode(a_b_u8, k5, iterations=2)
+    a_body = a_b_u8.astype(np.float32) / 255.0
+    a_body = np.where(a_body < 0.40, 0.0, np.where(a_body > 0.85, 1.0, a_body))
+    a_body = cv2.GaussianBlur(a_body, (3, 3), 0.45)
+    a_body = np.clip(a_body, 0.0, 1.0)
+    a_body = np.where(a_body < 0.28, 0.0, np.where(a_body > 0.90, 1.0, a_body))
 
-    # 4) Colour decontamination using *raw* rembg alpha (better estimate).
+    # --- Hair mask: softer, keep partial alpha for natural strands ---
+    # Map raw alpha gently; dark strands on white need soft edges, not binary.
+    a_hair = np.clip((alpha_raw - 0.15) / 0.70, 0.0, 1.0)
+    a_hair = np.where(hair_keep, a_hair, 0.0)
+    # Mild blur so hairline isn't stair-stepped
+    a_hair = cv2.GaussianBlur(a_hair, (3, 3), 0.6)
+    a_hair = np.clip(a_hair, 0.0, 1.0)
+    # Drop only the weakest dust; keep wisps
+    a_hair = np.where(a_hair < 0.12, 0.0, a_hair)
+
+    # Combine: body hard mask, hair can extend outside it
+    a = np.maximum(a_body, a_hair)
+
+    # Colour: decontaminate body edges; for hair use original RGB (already dark).
     bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
     eps = 1e-4
     a_raw3 = np.clip(alpha_raw, eps, 1.0)[:, :, None]
     fg = (rgb - (1.0 - a_raw3) * bg) / a_raw3
     fg = np.clip(fg, 0, 255)
 
-    edge = (a > 0.02) & (a < 0.98)
     rgb_out = rgb.copy()
-    rgb_out[edge] = fg[edge]
-    # Solid interior: prefer original RGB (less posterization).
-    solid = a >= 0.98
-    rgb_out[solid] = rgb[solid]
+    body_edge = (~hair_keep) & (a_body > 0.02) & (a_body < 0.98)
+    rgb_out[body_edge] = fg[body_edge]
+    solid_body = (~hair_keep) & (a_body >= 0.98)
+    rgb_out[solid_body] = rgb[solid_body]
 
-    # 5) Composite onto pure white
+    # Hair colour: sample interior hair (dark, solid) and pull fringe toward it
+    # instead of un-premultiply (which creates ink-black rims).
+    if hair_keep.any():
+        solid_hair = hair_keep & (alpha_raw >= 0.75) & (rgb.mean(axis=2) <= 70)
+        if solid_hair.any():
+            # Median dark hair colour as reference
+            ref = np.median(rgb[solid_hair], axis=0)
+        else:
+            ref = np.array([25.0, 20.0, 18.0], dtype=np.float32)
+        fringe_h = hair_keep & (a > 0.05)
+        # Blend fringe RGB toward reference; keep some texture from original
+        mix = 0.55
+        blended = rgb * (1.0 - mix) + ref.reshape(1, 1, 3) * mix
+        # Only where fringe is washed lighter than true hair
+        fringe_lum = rgb.mean(axis=2)
+        needs = fringe_h & (fringe_lum > 45)
+        rgb_out[needs] = blended[needs]
+        rgb_out[fringe_h & ~needs] = rgb[fringe_h & ~needs]
+
     a3 = a[:, :, None]
     out = rgb_out * a3 + bg * (1.0 - a3)
     out = np.clip(out, 0, 255).astype(np.uint8)
 
-    # 6) Force pure white outside subject + scrub residual halo
-    out[a < 0.08] = bg_rgb
-    out = _scrub_grey_halo(out, a, bg_rgb)
-    out = _eat_light_halo(out, bg_rgb, max_px=4)
+    out[a < 0.06] = bg_rgb
+    out = _scrub_grey_halo(out, a, bg_rgb, protect_dark=True)
+    out = _eat_light_halo(out, bg_rgb, max_px=3, protect_lum=100.0)
+    out = _scrub_black_outline(out, bg_rgb)
     return Image.fromarray(out, mode="RGB")
+
+
+def _scrub_black_outline(
+    rgb: np.ndarray,
+    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
+) -> np.ndarray:
+    """Remove thin ink-black rims left by bad matte un-premultiply on white."""
+    out = rgb.copy()
+    lum = out.mean(axis=2)
+    mn = out.min(axis=2)
+    mx = out.max(axis=2)
+    chroma = mx - mn
+    pure_white = (mn >= 250) & (chroma <= 6)
+    if not pure_white.any():
+        return out
+
+    non_w = (~pure_white).astype(np.uint8) * 255
+    dist = cv2.distanceTransform(non_w, cv2.DIST_L2, 3)
+    # Near-black / very dark pixels within 2px of pure white = artifact outline
+    rim = (dist > 0) & (dist <= 2.0)
+    ink = (lum <= 28) & (chroma <= 25)
+    # Also kill isolated dark spikes (1px junk)
+    kill = rim & ink
+    out[kill] = bg_rgb
+
+    # Soften remaining ultra-dark rim by inpainting from interior subject
+    still_rim = rim & (out.mean(axis=2) <= 35)
+    if still_rim.any():
+        # Replace with pure white — thin black hair outline reads as cutout error
+        out[still_rim] = bg_rgb
+    return out
 
 
 def _scrub_grey_halo(
     rgb: np.ndarray,
     alpha: np.ndarray,
     bg_rgb: Tuple[int, int, int],
+    protect_dark: bool = True,
 ) -> np.ndarray:
     """Replace residual grey fringe pixels with pure background."""
     out = rgb.copy()
@@ -176,19 +259,24 @@ def _scrub_grey_halo(
 
     a_u8 = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    # Tight subject core; anything outside is background.
     subject = cv2.dilate(a_u8, kernel, iterations=1) > 30
-    out[~subject] = bg_rgb
+    # Never force pure white over dark hair outside the dilated core
+    if protect_dark:
+        dark_hair = (lum <= 100) & (chroma <= 50)
+        out[(~subject) & (~dark_hair)] = bg_rgb
+    else:
+        out[~subject] = bg_rgb
 
-    # Soft fringe band: pale/mid greys near partial alpha → white
     fringe = (alpha < 0.99) & (alpha > 0.02)
     pale_grey = (lum >= 175) & (chroma <= 40) & fringe
     mid_grey = (lum >= 140) & (lum < 175) & (chroma <= 28) & (alpha < 0.75)
-    # Lightened clothing rim (navy washed toward grey by soft matte)
     washed = (lum >= 120) & (chroma <= 18) & fringe & (alpha < 0.85)
-    out[pale_grey | mid_grey | washed] = bg_rgb
+    # Do not scrub dark hair pixels
+    scrub = pale_grey | mid_grey | washed
+    if protect_dark:
+        scrub = scrub & (lum >= 110)
+    out[scrub] = bg_rgb
 
-    # Near-white anywhere (passport white bg)
     near_white = (mn >= 225) & (chroma <= 22)
     out[near_white] = bg_rgb
     return out
@@ -198,12 +286,14 @@ def _eat_light_halo(
     rgb: np.ndarray,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
     max_px: int = 3,
+    protect_lum: float = 105.0,
 ) -> np.ndarray:
     """Grow pure white inward over light/desaturated rim pixels.
 
     After composite, a 1–3 px ring of washed-out colour often remains between
     pure white and solid subject. Those pixels sit next to pure white and are
     brighter/greyer than true clothing/hair — replace them with background.
+    Dark hair (low luminance) is never eaten.
     """
     out = rgb.copy()
     mn = out.min(axis=2).astype(np.int16)
@@ -215,22 +305,18 @@ def _eat_light_halo(
     if not pure_white.any() or pure_white.all():
         return out
 
-    # Distance into non-white from pure white (0 = white, higher = deeper).
-    # Invert pure_white so distanceTransform measures from white boundary.
     non_white_u8 = (~pure_white).astype(np.uint8) * 255
     dist = cv2.distanceTransform(non_white_u8, cv2.DIST_L2, 3)
 
-    # Light/desaturated rim within max_px of pure white → force bg.
-    # Keep saturated / dark subject (hair, navy shirt) intact.
     rim = (dist > 0) & (dist <= float(max_px))
     lightish = lum >= 145
     desat = chroma <= 45
-    # Extra: very pale fringe even with a bit more chroma (skin-bleed on white)
     very_pale = (lum >= 200) & (chroma <= 55)
-    eat = rim & ((lightish & desat) | very_pale)
+    # Protect dark hair / navy fabric
+    dark_protect = lum < protect_lum
+    eat = rim & ((lightish & desat) | very_pale) & (~dark_protect)
     out[eat] = bg_rgb
 
-    # Final pure-white snap for anything that became near-white
     mn2 = out.min(axis=2)
     mx2 = out.max(axis=2)
     out[(mn2 >= 230) & ((mx2 - mn2) <= 20)] = bg_rgb
