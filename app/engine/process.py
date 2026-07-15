@@ -130,9 +130,9 @@ def _composite_clean_white(
 ) -> Image.Image:
     """Composite RGBA cutout onto pure white without soft edge outlines.
 
-    Body edges are hardened to kill white/grey halo. Dark hair uses a softer
-    path: keep strand matte (dark-on-white looks natural) without forcing a
-    solid black outline from aggressive un-premultiply.
+    Body uses a *binary* mask (no partial-alpha AA) so navy clothing does not
+    pick up a dark outline. Hair keeps a softer matte for natural strands.
+    Final passes scrub pale halo and dark silhouette rims.
     """
     arr = np.array(rgba).astype(np.float32)
     rgb = arr[:, :, :3]
@@ -144,104 +144,131 @@ def _composite_clean_white(
     k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     hair_keep = cv2.dilate(hair.astype(np.uint8) * 255, k3, iterations=1) > 0
 
-    # --- Body mask: hard cut + erode (kills clothing halo) ---
-    cut_b, keep_b = 0.58, 0.92
+    # --- Body: hard binary mask (partial alpha → dark outline on navy) ---
+    cut_b, keep_b = 0.55, 0.90
     a_body = np.clip((alpha - cut_b) / max(keep_b - cut_b, 1e-6), 0.0, 1.0)
     a_b_u8 = (a_body * 255).astype(np.uint8)
     a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_OPEN, k3, iterations=1)
     a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_CLOSE, k5, iterations=1)
+    # Erode past contaminated rim (source of black shoulder stroke)
     a_b_u8 = cv2.erode(a_b_u8, k5, iterations=2)
-    a_body = a_b_u8.astype(np.float32) / 255.0
-    a_body = np.where(a_body < 0.40, 0.0, np.where(a_body > 0.85, 1.0, a_body))
-    a_body = cv2.GaussianBlur(a_body, (3, 3), 0.45)
-    a_body = np.clip(a_body, 0.0, 1.0)
-    a_body = np.where(a_body < 0.28, 0.0, np.where(a_body > 0.90, 1.0, a_body))
+    a_b_u8 = cv2.erode(a_b_u8, k3, iterations=1)
+    # Fully binary body — no soft AA (AA darkens navy into a black edge)
+    a_body = (a_b_u8 > 127).astype(np.float32)
 
-    # --- Hair mask: softer, keep partial alpha for natural strands ---
-    # Map raw alpha gently; dark strands on white need soft edges, not binary.
-    a_hair = np.clip((alpha_raw - 0.15) / 0.70, 0.0, 1.0)
+    # --- Hair: softer partial matte ---
+    a_hair = np.clip((alpha_raw - 0.18) / 0.65, 0.0, 1.0)
     a_hair = np.where(hair_keep, a_hair, 0.0)
-    # Mild blur so hairline isn't stair-stepped
-    a_hair = cv2.GaussianBlur(a_hair, (3, 3), 0.6)
+    a_hair = cv2.GaussianBlur(a_hair, (3, 3), 0.55)
     a_hair = np.clip(a_hair, 0.0, 1.0)
-    # Drop only the weakest dust; keep wisps
-    a_hair = np.where(a_hair < 0.12, 0.0, a_hair)
+    a_hair = np.where(a_hair < 0.15, 0.0, a_hair)
 
-    # Combine: body hard mask, hair can extend outside it
     a = np.maximum(a_body, a_hair)
 
-    # Colour: decontaminate body edges; for hair use original RGB (already dark).
-    bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
-    eps = 1e-4
-    a_raw3 = np.clip(alpha_raw, eps, 1.0)[:, :, None]
-    fg = (rgb - (1.0 - a_raw3) * bg) / a_raw3
-    fg = np.clip(fg, 0, 255)
-
+    # Body colour: use original RGB only (skip un-premultiply — it inks edges)
     rgb_out = rgb.copy()
-    body_edge = (~hair_keep) & (a_body > 0.02) & (a_body < 0.98)
-    rgb_out[body_edge] = fg[body_edge]
-    solid_body = (~hair_keep) & (a_body >= 0.98)
-    rgb_out[solid_body] = rgb[solid_body]
-
-    # Hair colour: sample interior hair (dark, solid) and pull fringe toward it
-    # instead of un-premultiply (which creates ink-black rims).
     if hair_keep.any():
         solid_hair = hair_keep & (alpha_raw >= 0.75) & (rgb.mean(axis=2) <= 70)
         if solid_hair.any():
-            # Median dark hair colour as reference
             ref = np.median(rgb[solid_hair], axis=0)
         else:
-            ref = np.array([25.0, 20.0, 18.0], dtype=np.float32)
-        fringe_h = hair_keep & (a > 0.05)
-        # Blend fringe RGB toward reference; keep some texture from original
-        mix = 0.55
-        blended = rgb * (1.0 - mix) + ref.reshape(1, 1, 3) * mix
-        # Only where fringe is washed lighter than true hair
+            ref = np.array([28.0, 22.0, 20.0], dtype=np.float32)
+        fringe_h = hair_keep & (a > 0.05) & (a < 0.98)
         fringe_lum = rgb.mean(axis=2)
-        needs = fringe_h & (fringe_lum > 45)
+        # Only de-milk washed strands; leave already-dark hair alone
+        needs = fringe_h & (fringe_lum > 50)
+        blended = rgb * 0.5 + ref.reshape(1, 1, 3) * 0.5
         rgb_out[needs] = blended[needs]
-        rgb_out[fringe_h & ~needs] = rgb[fringe_h & ~needs]
 
     a3 = a[:, :, None]
+    bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
     out = rgb_out * a3 + bg * (1.0 - a3)
     out = np.clip(out, 0, 255).astype(np.uint8)
 
-    out[a < 0.06] = bg_rgb
+    out[a < 0.05] = bg_rgb
     out = _scrub_grey_halo(out, a, bg_rgb, protect_dark=True)
-    out = _eat_light_halo(out, bg_rgb, max_px=3, protect_lum=100.0)
-    out = _scrub_black_outline(out, bg_rgb)
+    out = _eat_light_halo(out, bg_rgb, max_px=3, protect_lum=95.0)
+    out = _fix_silhouette_rim(out, bg_rgb)
     return Image.fromarray(out, mode="RGB")
 
 
-def _scrub_black_outline(
+def _fix_silhouette_rim(
     rgb: np.ndarray,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
 ) -> np.ndarray:
-    """Remove thin ink-black rims left by bad matte un-premultiply on white."""
-    out = rgb.copy()
+    """Remove dark outline stroke and pale fringe along the silhouette.
+
+    rembg + hard masks often leave a 1–3 px ring that is *darker* than the
+    interior clothing (black shoulder line) or paler (white halo). Compare
+    each rim pixel to the interior a few pixels inward and correct it.
+    """
+    out = rgb.copy().astype(np.float32)
     lum = out.mean(axis=2)
     mn = out.min(axis=2)
     mx = out.max(axis=2)
     chroma = mx - mn
+
     pure_white = (mn >= 250) & (chroma <= 6)
-    if not pure_white.any():
-        return out
+    if not pure_white.any() or pure_white.all():
+        return rgb
 
     non_w = (~pure_white).astype(np.uint8) * 255
     dist = cv2.distanceTransform(non_w, cv2.DIST_L2, 3)
-    # Near-black / very dark pixels within 2px of pure white = artifact outline
-    rim = (dist > 0) & (dist <= 2.0)
-    ink = (lum <= 28) & (chroma <= 25)
-    # Also kill isolated dark spikes (1px junk)
-    kill = rim & ink
-    out[kill] = bg_rgb
 
-    # Soften remaining ultra-dark rim by inpainting from interior subject
-    still_rim = rim & (out.mean(axis=2) <= 35)
-    if still_rim.any():
-        # Replace with pure white — thin black hair outline reads as cutout error
-        out[still_rim] = bg_rgb
-    return out
+    # Interior reference: median blur of subject (ignores thin rim noise)
+    subject = (~pure_white).astype(np.uint8) * 255
+    # Push white over subject briefly so blur samples interior only
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    interior_mask = cv2.erode(subject, k, iterations=1) > 0
+    interior = out.copy()
+    interior[~interior_mask] = 0
+    # Box filter over interior; fall back to global subject median where empty
+    ref = cv2.blur(interior, (15, 15))
+    ref_w = cv2.blur(interior_mask.astype(np.float32), (15, 15))
+    ref_w = np.maximum(ref_w, 1e-4)[:, :, None]
+    ref = ref / ref_w
+    if interior_mask.any():
+        global_ref = np.median(out[interior_mask], axis=0)
+    else:
+        global_ref = np.array(bg_rgb, dtype=np.float32)
+    missing = ~interior_mask
+    ref[missing] = global_ref
+    ref_lum = ref.mean(axis=2)
+
+    # Outer rim only (next to pure white background) — never interior clothing
+    rim = (dist > 0) & (dist <= 2.5)
+    rim_lum = lum
+
+    # 1) Dark stroke: clearly darker than nearby interior fabric → white
+    darker = rim & (rim_lum < ref_lum - 14.0) & (rim_lum < 90) & (dist <= 2.0)
+    # Absolute ink outline (black cutout edge on navy)
+    ink = rim & (rim_lum <= 38) & (dist <= 1.8) & (rim_lum < ref_lum - 5.0)
+    out[darker | ink] = bg_rgb
+
+    # 2) Pale washed rim (not white clothing: must be desaturated + lighter
+    #    than interior, and only in the outermost 1.5 px)
+    pale = (
+        rim
+        & (dist <= 1.6)
+        & (rim_lum >= 175)
+        & (chroma <= 28)
+        & (rim_lum > ref_lum + 25)
+    )
+    out[pale] = bg_rgb
+
+    # 3) Mild dark rim: recolour toward interior fabric (keeps shape)
+    mid = rim & ~(darker | ink | pale) & (dist <= 2.0)
+    still_dark = mid & (out.mean(axis=2) < ref_lum - 12.0) & (out.mean(axis=2) < 100)
+    if still_dark.any():
+        out[still_dark] = 0.25 * out[still_dark] + 0.75 * ref[still_dark]
+
+    out_u8 = np.clip(out, 0, 255).astype(np.uint8)
+    # Snap only true near-white *background* leftovers, not collar stripes
+    # (collar stripes sit deeper than dist 2 and have interior neighbors)
+    snap = (out_u8.min(axis=2) >= 245) & ((out_u8.max(axis=2) - out_u8.min(axis=2)) <= 12)
+    snap = snap & (dist <= 1.2)
+    out_u8[snap] = bg_rgb
+    return out_u8
 
 
 def _scrub_grey_halo(
@@ -277,7 +304,9 @@ def _scrub_grey_halo(
         scrub = scrub & (lum >= 110)
     out[scrub] = bg_rgb
 
-    near_white = (mn >= 225) & (chroma <= 22)
+    # Only snap near-white where alpha says "background / edge", not solid
+    # white clothing (collar stripes sit at high alpha).
+    near_white = (mn >= 245) & (chroma <= 12) & (alpha < 0.85)
     out[near_white] = bg_rgb
     return out
 
@@ -521,27 +550,23 @@ def _clean_near_white(
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
     threshold: int = 225,
 ) -> Image.Image:
-    """Final pass after resize: kill pale fringes reintroduced by LANCZOS.
+    """Final pass after resize: clean only the outer silhouette fringe.
 
-    Downscaling softens the subject edge into a light ring on pure white.
-    Snap near-white pixels, then eat the light halo from outside in.
+    Do NOT globally snap pale pixels — that erases white clothing stripes
+    (collar rings) into the background and leaves a dashed collar look.
     """
     arr = np.array(im.convert("RGB"))
     mn = arr.min(axis=2)
     mx = arr.max(axis=2)
     chroma = mx - mn
-    lum = arr.mean(axis=2)
 
-    near = (mn >= threshold) & (chroma <= 22)
-    pale = (lum >= 200) & (chroma <= 28)
-    mid_fringe = (lum >= 165) & (lum < 200) & (chroma <= 22)
-    arr[near | pale | mid_fringe] = bg_rgb
-    pure = (arr[:, :, 0] >= 238) & (arr[:, :, 1] >= 238) & (arr[:, :, 2] >= 238)
-    arr[pure] = bg_rgb
+    # Only force pure-white snap for pixels already essentially background
+    near = (mn >= threshold) & (chroma <= 18)
+    arr[near] = bg_rgb
 
-    # Scale-aware halo eat: ~0.5% of min dimension, clamp 2–5 px
     max_px = int(np.clip(round(min(arr.shape[0], arr.shape[1]) * 0.005), 2, 5))
-    arr = _eat_light_halo(arr, bg_rgb, max_px=max_px)
+    arr = _eat_light_halo(arr, bg_rgb, max_px=max_px, protect_lum=95.0)
+    arr = _fix_silhouette_rim(arr, bg_rgb)
     return Image.fromarray(arr)
 
 
