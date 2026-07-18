@@ -41,9 +41,11 @@
 
   const DESCRIPTIONS = {
     "indian-passport":
-      "Indian Passport / Visa / OCI — 2×2\", white background, VFS/MEA geometry.",
+      "India 2×2″ (VFS / abroad / US-style) — square, white BG, head 1–1⅜″.",
+    "passport-seva-35x45":
+      "Passport Seva India — 35×45 mm print + 630×810 upload (<250 KB), face ~80–85%.",
     "us-passport":
-      "US Passport / Visa — 2×2\", white background, ICAO-style geometry.",
+      "US Passport / Visa — 2×2″, white background, ICAO-style geometry.",
   };
 
   function setStatus(msg, kind) {

@@ -290,11 +290,15 @@ def frame_to_spec(
       scale_factor: >1 enlarges subject (bigger head in frame), <1 shrinks
       offset_x_frac / offset_y_frac: shift as fraction of output size (+right / +down)
     """
-    out_px = out_px or spec.print_px
-    out_w = out_px
-    out_h = out_px if spec.is_square else int(
-        out_px * spec.photo_inches[1] / spec.photo_inches[0]
-    )
+    if out_px is not None:
+        out_w = int(out_px)
+        out_h = (
+            int(out_px)
+            if spec.is_square
+            else max(1, int(round(out_px * spec.photo_inches[1] / spec.photo_inches[0])))
+        )
+    else:
+        out_w, out_h = spec.output_size()
 
     scale_factor = float(max(0.75, min(1.35, scale_factor)))
     offset_x_frac = float(max(-0.12, min(0.12, offset_x_frac)))
@@ -344,7 +348,9 @@ def frame_to_spec(
         "eye_from_bottom_max_in": round(
             spec.eye_from_bottom_max * spec.photo_inches[1], 3
         ),
-        "output_px": float(out_px),
+        "output_px": float(out_w),
+        "output_w": float(out_w),
+        "output_h": float(out_h),
         "scale": round(scale, 4),
         "scale_factor": scale_factor,
         "offset_x_frac": offset_x_frac,
@@ -412,22 +418,38 @@ def export_framed(
     warnings: Optional[List[str]] = None,
     full_report: Optional[ValidationReport] = None,
 ) -> Tuple[Dict[str, bytes], bytes, bytes, Dict[str, float]]:
-    """Build download files + preview + guide preview from a framed square photo."""
+    """Build download files + preview + guide preview from a framed photo."""
     warnings = warnings or []
     metrics: Dict[str, float] = {}
     files: Dict[str, bytes] = {}
     base = f"{spec.id}"
+    pw, ph = spec.output_size()
 
-    print_img = framed.resize((spec.print_px, spec.print_px), Image.Resampling.LANCZOS)
-    files[f"{base}_PRINT_2x2_inch.jpg"] = jpeg_bytes(
+    print_img = framed.resize((pw, ph), Image.Resampling.LANCZOS)
+    if spec.photo_mm:
+        label = f"PRINT_{int(spec.photo_mm[0])}x{int(spec.photo_mm[1])}mm"
+    elif spec.is_square:
+        label = "PRINT_2x2_inch"
+    else:
+        label = f"PRINT_{spec.photo_inches[0]:.2f}x{spec.photo_inches[1]:.2f}in"
+    files[f"{base}_{label}.jpg"] = jpeg_bytes(
         print_img, quality=95, dpi=(spec.print_dpi, spec.print_dpi)
     )
-    master = framed.resize((1800, 1800), Image.Resampling.LANCZOS)
+    # Master: longest side 1800, keep aspect
+    scale_m = 1800 / max(pw, ph)
+    mw, mh = max(1, int(pw * scale_m)), max(1, int(ph * scale_m))
+    master = framed.resize((mw, mh), Image.Resampling.LANCZOS)
     files[f"{base}_master.jpg"] = jpeg_bytes(master, quality=97, dpi=(600, 600))
 
     for uv in spec.upload_variants:
+        uw, uh = uv.pixel_size()
         data = save_upload_variant(
-            framed, uv.size_px, min_kb=uv.min_kb, max_kb=uv.max_kb
+            framed,
+            uw,
+            uh,
+            min_kb=uv.min_kb,
+            max_kb=uv.max_kb,
+            exact_pixels=uv.exact_pixels,
         )
         files[f"{base}_{uv.filename_suffix}.jpg"] = data
         metrics[f"{uv.filename_suffix}_kb"] = round(len(data) / 1024, 1)
@@ -445,9 +467,11 @@ def export_framed(
             sheet_im, quality=95, dpi=(300, 300)
         )
 
-    preview = framed.resize((512, 512), Image.Resampling.LANCZOS)
-    preview_jpeg = jpeg_bytes(preview, quality=88, dpi=(72, 72), progressive=True)
-    guide = build_guide_overlay(preview, spec)
+    # Preview fits in 512 box (may be non-square)
+    prev = framed.copy()
+    prev.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    preview_jpeg = jpeg_bytes(prev, quality=88, dpi=(72, 72), progressive=True)
+    guide = build_guide_overlay(prev, spec)
     guide_jpeg = jpeg_bytes(guide, quality=88, dpi=(72, 72), progressive=True)
 
     zip_buf = io.BytesIO()
@@ -512,35 +536,51 @@ def jpeg_bytes(
 
 def save_upload_variant(
     im: Image.Image,
-    size_px: int,
+    width_px: int,
+    height_px: Optional[int] = None,
     min_kb: int = 10,
     max_kb: int = 100,
+    exact_pixels: bool = False,
+    size_px: Optional[int] = None,  # legacy square alias
 ) -> bytes:
-    """Resize square and compress into portal file-size window."""
-    out = im.resize((size_px, size_px), Image.Resampling.LANCZOS)
-    min_b, max_b = min_kb * 1024, max_kb * 1024
+    """Resize and compress into portal file-size window.
 
-    for q in range(90, 38, -2):
+    If exact_pixels=True (Passport Seva 630×810), never change W×H — only quality.
+    """
+    if size_px is not None and height_px is None:
+        width_px = height_px = int(size_px)
+    if height_px is None:
+        height_px = int(width_px)
+    width_px, height_px = int(width_px), int(height_px)
+
+    out = im.resize((width_px, height_px), Image.Resampling.LANCZOS)
+    min_b, max_b = min_kb * 1024, max_kb * 1024
+    data = b""
+
+    for q in range(92, 28, -2):
         data = jpeg_bytes(out, quality=q, progressive=True, dpi=(72, 72))
         if min_b <= len(data) <= max_b:
             return data
+        if exact_pixels and len(data) <= max_b:
+            return data
 
-    # Shrink further if still too large
-    for s in (size_px, 500, 450, 400, 350, 300):
-        if s > size_px:
-            continue
-        out2 = im.resize((s, s), Image.Resampling.LANCZOS)
-        for q in range(85, 35, -2):
+    if exact_pixels:
+        # Must keep exact dimensions — squeeze quality only
+        for q in range(40, 12, -2):
+            data = jpeg_bytes(out, quality=q, progressive=True, dpi=(72, 72), optimize=True)
+            if len(data) <= max_b:
+                return data
+        return data
+
+    # Non-exact: allow mild downscale
+    for scale in (1.0, 0.9, 0.8, 0.7, 0.6):
+        w = max(200, int(width_px * scale))
+        h = max(200, int(height_px * scale))
+        out2 = im.resize((w, h), Image.Resampling.LANCZOS)
+        for q in range(85, 30, -2):
             data = jpeg_bytes(out2, quality=q, progressive=True, dpi=(72, 72))
             if min_b <= len(data) <= max_b:
                 return data
-
-    # Last resort: under max_kb
-    out3 = im.resize((min(350, size_px), min(350, size_px)), Image.Resampling.LANCZOS)
-    for q in range(70, 25, -5):
-        data = jpeg_bytes(out3, quality=q, progressive=True, dpi=(72, 72))
-        if len(data) <= max_b:
-            return data
     return data
 
 

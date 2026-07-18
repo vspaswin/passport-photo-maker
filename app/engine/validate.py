@@ -441,14 +441,28 @@ def validate_output_photo(
     w, h = framed.size
     checks["output_size"] = [w, h]
 
-    if w != h:
+    if spec.require_square and w != h:
         issues.append(
             ValidationIssue(
                 code="not_square",
-                message="Output photo is not square.",
+                message="Output photo is not square (required for this document type).",
                 how_to_fix="Internal error — please retry. If it persists, report a bug.",
             )
         )
+    if not spec.require_square:
+        # Soft check: aspect roughly matches photo_inches
+        target_ar = spec.photo_inches[0] / max(spec.photo_inches[1], 1e-6)
+        actual_ar = w / max(h, 1)
+        checks["aspect_target"] = round(target_ar, 3)
+        checks["aspect_actual"] = round(actual_ar, 3)
+        if abs(actual_ar - target_ar) > 0.08:
+            issues.append(
+                ValidationIssue(
+                    code="wrong_aspect",
+                    message="Output aspect ratio does not match the document photo size.",
+                    how_to_fix="Retry Convert with the correct document type selected.",
+                )
+            )
 
     bgr, gray = to_bgr_gray(framed)
     faces = detect_faces(gray, bgr=bgr)

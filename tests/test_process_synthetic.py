@@ -59,3 +59,19 @@ def test_letter_print_sheet_size():
         dpi=100,
     )
     assert sheet.size == (850, 1100)
+
+
+def test_frame_seva_35x45_aspect():
+    from app.engine.face import fallback_face
+    from app.engine.process import frame_to_spec, load_image
+    from app.engine.specs import get_spec
+
+    data = _synthetic_portrait()
+    im = load_image(data)
+    face = detect_face(im) or fallback_face(im)
+    spec = get_spec("passport-seva-35x45")
+    framed, metrics = frame_to_spec(im, face, spec)
+    w, h = framed.size
+    assert h > w
+    assert abs(w / h - 35 / 45) < 0.05
+    assert metrics["output_h"] > metrics["output_w"]

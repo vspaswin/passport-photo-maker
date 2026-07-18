@@ -16,6 +16,23 @@ def test_indian_passport_registered():
     assert letter.cols * letter.rows == 12
 
 
+def test_passport_seva_35x45_registered():
+    assert "passport-seva-35x45" in DOCUMENT_TYPES
+    spec = get_spec("passport-seva-35x45")
+    assert not spec.is_square
+    assert not spec.require_square
+    assert abs(spec.photo_mm[0] - 35.0) < 0.01
+    assert abs(spec.photo_mm[1] - 45.0) < 0.01
+    w, h = spec.output_size()
+    assert h > w
+    seva = next(v for v in spec.upload_variants if v.filename_suffix == "seva_630x810")
+    assert seva.pixel_size() == (630, 810)
+    assert seva.max_kb == 250
+    assert seva.exact_pixels is True
+
+
 def test_list_document_types():
     items = list_document_types()
-    assert any(i["id"] == "indian-passport" for i in items)
+    ids = {i["id"] for i in items}
+    assert "indian-passport" in ids
+    assert "passport-seva-35x45" in ids
