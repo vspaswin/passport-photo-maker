@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     credit_pack_starter: int = 10
     credit_pack_pro: int = 50
 
+    # u2net_human_seg: reliable on CPU. Try isnet/birefnet via REMBG_MODEL=.
     rembg_model: str = "u2net_human_seg"
     use_mediapipe: bool = True
 

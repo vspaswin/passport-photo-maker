@@ -45,25 +45,47 @@ class ProcessResult:
     face_dict: Optional[Dict] = None
 
 
+# Quality order from rembg ecosystem; CPU-friendly first in fallbacks.
+# birefnet-portrait is excellent but ~1GB and very slow on CPU — opt-in via REMBG_MODEL.
+_REMBG_MODEL_FALLBACKS = (
+    "u2net_human_seg",
+    "u2net",
+    "isnet-general-use",
+    "birefnet-portrait",
+    "birefnet-general",
+)
+
+
 def _get_rembg_session():
     global _rembg_session
     if _rembg_session is None:
         from rembg import new_session
 
-        model = "u2net_human_seg"
+        preferred = "u2net_human_seg"
         try:
             from app.core.config import get_settings
 
-            model = get_settings().rembg_model or model
+            preferred = get_settings().rembg_model or preferred
         except Exception:
             pass
-        try:
-            _rembg_session = new_session(model)
-            logger.info("Loaded rembg session (%s)", model)
-        except Exception:
-            logger.warning("Failed to load %s; falling back to u2net", model)
-            _rembg_session = new_session("u2net")
-            logger.info("Loaded rembg session (u2net)")
+
+        candidates: List[str] = []
+        for m in (preferred, *_REMBG_MODEL_FALLBACKS):
+            if m and m not in candidates:
+                candidates.append(m)
+
+        last_err: Optional[Exception] = None
+        for model in candidates:
+            try:
+                logger.info("Loading rembg model %s ...", model)
+                _rembg_session = new_session(model)
+                logger.info("Loaded rembg session (%s)", model)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                logger.warning("Could not load rembg model %s: %s", model, exc)
+        if _rembg_session is None:
+            raise RuntimeError(f"No rembg model could be loaded: {last_err}")
     return _rembg_session
 
 
@@ -73,283 +95,179 @@ def load_image(data: bytes) -> Image.Image:
     return im.convert("RGB")
 
 
-def remove_background_to_white(
-    im: Image.Image,
-    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
-) -> Image.Image:
-    """Remove background and composite onto solid colour with clean edges.
+def _corner_wall_stats(rgb: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """Median colour / luminance / chroma of the four image corners."""
+    h, w = rgb.shape[:2]
+    s = max(8, min(h, w) // 20)
+    corners = np.concatenate(
+        [
+            rgb[:s, :s].reshape(-1, 3),
+            rgb[:s, -s:].reshape(-1, 3),
+            rgb[-s:, :s].reshape(-1, 3),
+            rgb[-s:, -s:].reshape(-1, 3),
+        ],
+        axis=0,
+    )
+    wall = np.median(corners, axis=0).astype(np.float32)
+    chroma = float(
+        np.mean(corners.max(axis=1) - corners.min(axis=1))
+    )
+    return wall, float(wall.mean()), chroma
 
-    rembg's soft alpha often leaves a white/grey halo on passport white.
-    We skip soft alpha-matting (it widens the fringe), harden body edges,
-    but *restore dark hair fringes* so the hairline does not look chopped.
-    """
+
+def _is_plain_light_wall(wall_lum: float, wall_chroma: float) -> bool:
+    """True when photo is already on a light plain backdrop (best natural path)."""
+    return wall_lum >= 200.0 and wall_chroma <= 35.0
+
+
+def _alpha_from_grabcut(im: Image.Image) -> np.ndarray:
+    """Soft subject mask via OpenCV GrabCut (fast, natural on plain walls)."""
+    rgb = np.array(im.convert("RGB"))
+    h, w = rgb.shape[:2]
+    face = detect_face(im) or fallback_face(im)
+    x0 = max(0, face.x - int(0.65 * face.w))
+    y0 = max(0, face.top_of_head - int(0.2 * face.h))
+    x1 = min(w, face.x + face.w + int(0.65 * face.w))
+    y1 = min(h, face.chin + int(1.5 * face.h))
+    rect = (x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    mask = np.zeros((h, w), np.uint8)
+    bgd = np.zeros((1, 65), np.float64)
+    fgd = np.zeros((1, 65), np.float64)
+    cv2.grabCut(bgr, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+    a = np.where((mask == 1) | (mask == 3), 1.0, 0.0).astype(np.float32)
+    a = cv2.GaussianBlur(a, (5, 5), 1.0)
+    return np.clip(a, 0.0, 1.0)
+
+
+def _alpha_from_rembg(im: Image.Image) -> np.ndarray:
+    """Soft subject mask from rembg (for busy / non-white backgrounds)."""
     from rembg import remove
 
     session = _get_rembg_session()
     buf = io.BytesIO()
     im.save(buf, format="PNG")
+    raw = buf.getvalue()
+    try:
+        mask_bytes = remove(raw, session=session, only_mask=True)
+        alpha_im = Image.open(io.BytesIO(mask_bytes)).convert("L")
+    except Exception:  # noqa: BLE001
+        cut = remove(raw, session=session)
+        alpha_im = Image.open(io.BytesIO(cut)).convert("RGBA").split()[-1]
+    if alpha_im.size != im.size:
+        alpha_im = alpha_im.resize(im.size, Image.Resampling.LANCZOS)
+    return np.array(alpha_im, dtype=np.float32) / 255.0
 
-    # Standard cutout (harder silhouette). Alpha-matting softens edges and
-    # is a common source of the white outline on hair/shoulders.
-    cut = remove(buf.getvalue(), session=session)
 
-    rgba = Image.open(io.BytesIO(cut)).convert("RGBA")
-    return _composite_clean_white(rgba, bg_rgb)
+def remove_background_to_white(
+    im: Image.Image,
+    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
+) -> Image.Image:
+    """Pure white background with natural hair — keep original person pixels.
 
+    Strategy:
+      • Plain light wall (typical home passport shot): GrabCut mask + original RGB
+        → looks like left photo, only wall becomes pure white (not a cutout paste).
+      • Busy backgrounds: rembg mask + same original-pixel composite.
 
-def _hair_fringe_mask(
-    rgb: np.ndarray,
-    alpha_raw: np.ndarray,
-) -> np.ndarray:
-    """Find dark hair-like pixels in rembg's soft matte (wisps / hairline).
-
-    These are dark, low-chroma, partial-alpha samples that aggressive erode
-    would otherwise delete — causing the "helmet / cookie-cutter" hair look.
+    Never re-colours the subject from rembg's baked RGBA (that looks artificial).
     """
+    rgb = np.array(im.convert("RGB"), dtype=np.float32)
+    wall, wall_lum, wall_chroma = _corner_wall_stats(rgb)
+
+    if _is_plain_light_wall(wall_lum, wall_chroma):
+        logger.info(
+            "Plain light wall detected (lum=%.0f chroma=%.1f) — natural GrabCut path",
+            wall_lum,
+            wall_chroma,
+        )
+        try:
+            alpha = _alpha_from_grabcut(im)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GrabCut failed (%s); falling back to rembg", exc)
+            alpha = _alpha_from_rembg(im)
+    else:
+        logger.info(
+            "Non-plain background (lum=%.0f chroma=%.1f) — rembg mask path",
+            wall_lum,
+            wall_chroma,
+        )
+        alpha = _alpha_from_rembg(im)
+
+    return _composite_original_on_white(im, alpha, wall, bg_rgb)
+
+
+def _composite_original_on_white(
+    original: Image.Image,
+    alpha: np.ndarray,
+    wall: Optional[np.ndarray] = None,
+    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
+) -> Image.Image:
+    """Soft-mask original photo onto pure white — natural hair, clean wall."""
+    rgb = np.array(original.convert("RGB"), dtype=np.float32)
+    if alpha.shape[:2] != rgb.shape[:2]:
+        alpha = cv2.resize(alpha, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+
+    if wall is None:
+        wall, _, _ = _corner_wall_stats(rgb)
+    wall = np.asarray(wall, dtype=np.float32).reshape(3)
+
+    # Mild clean — keep soft hair (no hard erode)
+    a_u8 = (a * 255).astype(np.uint8)
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    a_u8 = cv2.morphologyEx(a_u8, cv2.MORPH_OPEN, k3, iterations=1)
+    a = a_u8.astype(np.float32) / 255.0
+    a = cv2.GaussianBlur(a, (3, 3), 0.5)
+    a = np.clip(a, 0.0, 1.0)
+    a = np.where(a < 0.03, 0.0, a)
+    a = np.where(a > 0.94, 1.0, a)
+
+    # Wall-like pixels that aren't solid subject → pure background
     lum = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
-    # True dark strands only (avoid grey matte / skin)
-    hair = (
-        (alpha_raw >= 0.20)
-        & (alpha_raw <= 0.96)
-        & (lum <= 80.0)
-        & (chroma <= 48.0)
-    )
-    core = (alpha_raw >= 0.60).astype(np.uint8) * 255
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    near_core = cv2.dilate(core, k, iterations=2) > 0
-    hair = hair & near_core
-    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    hair_u8 = cv2.morphologyEx(hair.astype(np.uint8) * 255, cv2.MORPH_CLOSE, k3, iterations=1)
-    return hair_u8 > 0
+    wall_lum = float(wall.mean())
+    wall_like = (lum >= wall_lum - 18) & (lum >= 195) & (chroma <= 28) & (a < 0.60)
+    a = np.where(wall_like, 0.0, a)
+
+    # Despill edges using *original wall* colour (not white)
+    eps = 1e-3
+    a3 = a[:, :, None]
+    wall3 = wall.reshape(1, 1, 3)
+    edge = (a > 0.04) & (a < 0.96)
+    fg = (rgb - (1.0 - a3) * wall3) / np.maximum(a3, eps)
+    fg = np.clip(fg, 0, 255)
+    rgb_out = rgb.copy()
+    needs = edge & (lum > 75)
+    rgb_out[needs] = fg[needs]
+    # Keep original interior + dark hair strands (natural look from left photo)
+    keep = (a >= 0.95) | ((a > 0.12) & (lum < 90))
+    rgb_out[keep] = rgb[keep]
+
+    bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
+    out = rgb_out * a3 + bg * (1.0 - a3)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    out[a < 0.02] = bg_rgb
+
+    mn = out.min(axis=2)
+    mx = out.max(axis=2)
+    out_lum = out.mean(axis=2)
+    leftover = (a < 0.50) & (out_lum >= 210) & ((mx - mn) <= 22)
+    out[leftover] = bg_rgb
+    out[(mn >= 248) & ((mx - mn) <= 8)] = bg_rgb
+    return Image.fromarray(out, mode="RGB")
 
 
 def _composite_clean_white(
     rgba: Image.Image,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
 ) -> Image.Image:
-    """Composite RGBA cutout onto pure white without soft edge outlines.
-
-    Body uses a *binary* mask (no partial-alpha AA) so navy clothing does not
-    pick up a dark outline. Hair keeps a softer matte for natural strands.
-    Final passes scrub pale halo and dark silhouette rims.
-    """
-    arr = np.array(rgba).astype(np.float32)
-    rgb = arr[:, :, :3]
-    alpha = arr[:, :, 3] / 255.0
-    alpha_raw = alpha.copy()
-
-    hair = _hair_fringe_mask(rgb, alpha_raw)
-    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    hair_keep = cv2.dilate(hair.astype(np.uint8) * 255, k3, iterations=1) > 0
-
-    # --- Body: hard binary mask (partial alpha → dark outline on navy) ---
-    cut_b, keep_b = 0.55, 0.90
-    a_body = np.clip((alpha - cut_b) / max(keep_b - cut_b, 1e-6), 0.0, 1.0)
-    a_b_u8 = (a_body * 255).astype(np.uint8)
-    a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_OPEN, k3, iterations=1)
-    a_b_u8 = cv2.morphologyEx(a_b_u8, cv2.MORPH_CLOSE, k5, iterations=1)
-    # Erode past contaminated rim (source of black shoulder stroke)
-    a_b_u8 = cv2.erode(a_b_u8, k5, iterations=2)
-    a_b_u8 = cv2.erode(a_b_u8, k3, iterations=1)
-    # Fully binary body — no soft AA (AA darkens navy into a black edge)
-    a_body = (a_b_u8 > 127).astype(np.float32)
-
-    # --- Hair: softer partial matte ---
-    a_hair = np.clip((alpha_raw - 0.18) / 0.65, 0.0, 1.0)
-    a_hair = np.where(hair_keep, a_hair, 0.0)
-    a_hair = cv2.GaussianBlur(a_hair, (3, 3), 0.55)
-    a_hair = np.clip(a_hair, 0.0, 1.0)
-    a_hair = np.where(a_hair < 0.15, 0.0, a_hair)
-
-    a = np.maximum(a_body, a_hair)
-
-    # Body colour: use original RGB only (skip un-premultiply — it inks edges)
-    rgb_out = rgb.copy()
-    if hair_keep.any():
-        solid_hair = hair_keep & (alpha_raw >= 0.75) & (rgb.mean(axis=2) <= 70)
-        if solid_hair.any():
-            ref = np.median(rgb[solid_hair], axis=0)
-        else:
-            ref = np.array([28.0, 22.0, 20.0], dtype=np.float32)
-        fringe_h = hair_keep & (a > 0.05) & (a < 0.98)
-        fringe_lum = rgb.mean(axis=2)
-        # Only de-milk washed strands; leave already-dark hair alone
-        needs = fringe_h & (fringe_lum > 50)
-        blended = rgb * 0.5 + ref.reshape(1, 1, 3) * 0.5
-        rgb_out[needs] = blended[needs]
-
-    a3 = a[:, :, None]
-    bg = np.array(bg_rgb, dtype=np.float32).reshape(1, 1, 3)
-    out = rgb_out * a3 + bg * (1.0 - a3)
-    out = np.clip(out, 0, 255).astype(np.uint8)
-
-    out[a < 0.05] = bg_rgb
-    out = _scrub_grey_halo(out, a, bg_rgb, protect_dark=True)
-    out = _eat_light_halo(out, bg_rgb, max_px=3, protect_lum=95.0)
-    out = _fix_silhouette_rim(out, bg_rgb)
-    return Image.fromarray(out, mode="RGB")
-
-
-def _fix_silhouette_rim(
-    rgb: np.ndarray,
-    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
-) -> np.ndarray:
-    """Remove dark outline stroke and pale fringe along the silhouette.
-
-    rembg + hard masks often leave a 1–3 px ring that is *darker* than the
-    interior clothing (black shoulder line) or paler (white halo). Compare
-    each rim pixel to the interior a few pixels inward and correct it.
-    """
-    out = rgb.copy().astype(np.float32)
-    lum = out.mean(axis=2)
-    mn = out.min(axis=2)
-    mx = out.max(axis=2)
-    chroma = mx - mn
-
-    pure_white = (mn >= 250) & (chroma <= 6)
-    if not pure_white.any() or pure_white.all():
-        return rgb
-
-    non_w = (~pure_white).astype(np.uint8) * 255
-    dist = cv2.distanceTransform(non_w, cv2.DIST_L2, 3)
-
-    # Interior reference: median blur of subject (ignores thin rim noise)
-    subject = (~pure_white).astype(np.uint8) * 255
-    # Push white over subject briefly so blur samples interior only
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    interior_mask = cv2.erode(subject, k, iterations=1) > 0
-    interior = out.copy()
-    interior[~interior_mask] = 0
-    # Box filter over interior; fall back to global subject median where empty
-    ref = cv2.blur(interior, (15, 15))
-    ref_w = cv2.blur(interior_mask.astype(np.float32), (15, 15))
-    ref_w = np.maximum(ref_w, 1e-4)[:, :, None]
-    ref = ref / ref_w
-    if interior_mask.any():
-        global_ref = np.median(out[interior_mask], axis=0)
-    else:
-        global_ref = np.array(bg_rgb, dtype=np.float32)
-    missing = ~interior_mask
-    ref[missing] = global_ref
-    ref_lum = ref.mean(axis=2)
-
-    # Outer rim only (next to pure white background) — never interior clothing
-    rim = (dist > 0) & (dist <= 2.5)
-    rim_lum = lum
-
-    # 1) Dark stroke: clearly darker than nearby interior fabric → white
-    darker = rim & (rim_lum < ref_lum - 14.0) & (rim_lum < 90) & (dist <= 2.0)
-    # Absolute ink outline (black cutout edge on navy)
-    ink = rim & (rim_lum <= 38) & (dist <= 1.8) & (rim_lum < ref_lum - 5.0)
-    out[darker | ink] = bg_rgb
-
-    # 2) Pale washed rim (not white clothing: must be desaturated + lighter
-    #    than interior, and only in the outermost 1.5 px)
-    pale = (
-        rim
-        & (dist <= 1.6)
-        & (rim_lum >= 175)
-        & (chroma <= 28)
-        & (rim_lum > ref_lum + 25)
-    )
-    out[pale] = bg_rgb
-
-    # 3) Mild dark rim: recolour toward interior fabric (keeps shape)
-    mid = rim & ~(darker | ink | pale) & (dist <= 2.0)
-    still_dark = mid & (out.mean(axis=2) < ref_lum - 12.0) & (out.mean(axis=2) < 100)
-    if still_dark.any():
-        out[still_dark] = 0.25 * out[still_dark] + 0.75 * ref[still_dark]
-
-    out_u8 = np.clip(out, 0, 255).astype(np.uint8)
-    # Snap only true near-white *background* leftovers, not collar stripes
-    # (collar stripes sit deeper than dist 2 and have interior neighbors)
-    snap = (out_u8.min(axis=2) >= 245) & ((out_u8.max(axis=2) - out_u8.min(axis=2)) <= 12)
-    snap = snap & (dist <= 1.2)
-    out_u8[snap] = bg_rgb
-    return out_u8
-
-
-def _scrub_grey_halo(
-    rgb: np.ndarray,
-    alpha: np.ndarray,
-    bg_rgb: Tuple[int, int, int],
-    protect_dark: bool = True,
-) -> np.ndarray:
-    """Replace residual grey fringe pixels with pure background."""
-    out = rgb.copy()
-    mn = out.min(axis=2)
-    mx = out.max(axis=2)
-    chroma = mx - mn
-    lum = out.mean(axis=2)
-
-    a_u8 = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    subject = cv2.dilate(a_u8, kernel, iterations=1) > 30
-    # Never force pure white over dark hair outside the dilated core
-    if protect_dark:
-        dark_hair = (lum <= 100) & (chroma <= 50)
-        out[(~subject) & (~dark_hair)] = bg_rgb
-    else:
-        out[~subject] = bg_rgb
-
-    fringe = (alpha < 0.99) & (alpha > 0.02)
-    pale_grey = (lum >= 175) & (chroma <= 40) & fringe
-    mid_grey = (lum >= 140) & (lum < 175) & (chroma <= 28) & (alpha < 0.75)
-    washed = (lum >= 120) & (chroma <= 18) & fringe & (alpha < 0.85)
-    # Do not scrub dark hair pixels
-    scrub = pale_grey | mid_grey | washed
-    if protect_dark:
-        scrub = scrub & (lum >= 110)
-    out[scrub] = bg_rgb
-
-    # Only snap near-white where alpha says "background / edge", not solid
-    # white clothing (collar stripes sit at high alpha).
-    near_white = (mn >= 245) & (chroma <= 12) & (alpha < 0.85)
-    out[near_white] = bg_rgb
-    return out
-
-
-def _eat_light_halo(
-    rgb: np.ndarray,
-    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
-    max_px: int = 3,
-    protect_lum: float = 105.0,
-) -> np.ndarray:
-    """Grow pure white inward over light/desaturated rim pixels.
-
-    After composite, a 1–3 px ring of washed-out colour often remains between
-    pure white and solid subject. Those pixels sit next to pure white and are
-    brighter/greyer than true clothing/hair — replace them with background.
-    Dark hair (low luminance) is never eaten.
-    """
-    out = rgb.copy()
-    mn = out.min(axis=2).astype(np.int16)
-    mx = out.max(axis=2).astype(np.int16)
-    chroma = (mx - mn).astype(np.int16)
-    lum = out.mean(axis=2)
-
-    pure_white = (mn >= 250) & (chroma <= 6)
-    if not pure_white.any() or pure_white.all():
-        return out
-
-    non_white_u8 = (~pure_white).astype(np.uint8) * 255
-    dist = cv2.distanceTransform(non_white_u8, cv2.DIST_L2, 3)
-
-    rim = (dist > 0) & (dist <= float(max_px))
-    lightish = lum >= 145
-    desat = chroma <= 45
-    very_pale = (lum >= 200) & (chroma <= 55)
-    # Protect dark hair / navy fabric
-    dark_protect = lum < protect_lum
-    eat = rim & ((lightish & desat) | very_pale) & (~dark_protect)
-    out[eat] = bg_rgb
-
-    mn2 = out.min(axis=2)
-    mx2 = out.max(axis=2)
-    out[(mn2 >= 230) & ((mx2 - mn2) <= 20)] = bg_rgb
-    return out
+    """Legacy path: composite rembg RGBA. Prefer remove_background_to_white."""
+    arr = np.array(rgba)
+    rgb_im = Image.fromarray(arr[:, :, :3], mode="RGB")
+    alpha = arr[:, :, 3].astype(np.float32) / 255.0
+    return _composite_original_on_white(rgb_im, alpha, None, bg_rgb)
 
 
 def detect_face(im: Image.Image) -> Optional[FaceBox]:
@@ -548,25 +466,27 @@ def export_framed(
 def _clean_near_white(
     im: Image.Image,
     bg_rgb: Tuple[int, int, int] = (255, 255, 255),
-    threshold: int = 225,
+    threshold: int = 242,
 ) -> Image.Image:
-    """Final pass after resize: clean only the outer silhouette fringe.
-
-    Do NOT globally snap pale pixels — that erases white clothing stripes
-    (collar rings) into the background and leaves a dashed collar look.
-    """
+    """After resize: snap true near-white fringe only (keep clothing whites)."""
     arr = np.array(im.convert("RGB"))
     mn = arr.min(axis=2)
     mx = arr.max(axis=2)
     chroma = mx - mn
+    lum = arr.mean(axis=2)
 
-    # Only force pure-white snap for pixels already essentially background
-    near = (mn >= threshold) & (chroma <= 18)
-    arr[near] = bg_rgb
+    # Pure near-white → background
+    arr[(mn >= threshold) & (chroma <= 14)] = bg_rgb
 
-    max_px = int(np.clip(round(min(arr.shape[0], arr.shape[1]) * 0.005), 2, 5))
-    arr = _eat_light_halo(arr, bg_rgb, max_px=max_px, protect_lum=95.0)
-    arr = _fix_silhouette_rim(arr, bg_rgb)
+    pure = (mn >= 250) & (chroma <= 5)
+    if pure.any() and not pure.all():
+        non_w = (~pure).astype(np.uint8) * 255
+        dist = cv2.distanceTransform(non_w, cv2.DIST_L2, 3)
+        rim = (dist > 0) & (dist <= 1.8)
+        # Only milky fringe next to pure white (not collar stripes deeper in)
+        pale = rim & (lum >= 190) & (chroma <= 30)
+        arr[pale] = bg_rgb
+
     return Image.fromarray(arr)
 
 
